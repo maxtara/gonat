@@ -35,29 +35,36 @@ type IfSet struct {
 }
 
 type Nat struct {
-	table          Nattable
-	interfaces     map[string]IfSet
-	defaultGateway IfSet
-	arpNotify      ARPNotify
-	dhcp           dhcp.DHCPHandler
-	nextSrcPort    uint16
-	srcPortLock    sync.Mutex
+	table               Nattable
+	interfaces          map[string]IfSet
+	defaultGateway      IfSet
+	arpNotify           ARPNotify
+	dhcp                dhcp.DHCPHandler
+	nextSrcPort         uint16
+	srcPortLock         sync.Mutex
+	portForwardingTable map[uint16]*PortForwardingRule
 }
 
-func CreateNat(defaultGateway IfSet, rest []IfSet) (n *Nat) {
+func CreateNat(defaultGateway IfSet, lans []IfSet, pfs []PortForwardingRule) (n *Nat) {
 	rand.Seed(time.Now().UnixNano())
 	randInt := rand.Intn(srcPortMax-srcPortMin) + srcPortMin
 	n = &Nat{
-		defaultGateway: defaultGateway,
-		interfaces:     make(map[string]IfSet),
-		dhcp:           dhcp.NewDHCPHandler(),
-		table:          Nattable{},
-		arpNotify:      ARPNotify{},
-		nextSrcPort:    uint16(randInt),
-		srcPortLock:    sync.Mutex{},
+		defaultGateway:      defaultGateway,
+		interfaces:          make(map[string]IfSet),
+		dhcp:                dhcp.NewDHCPHandler(),
+		table:               Nattable{},
+		arpNotify:           ARPNotify{},
+		nextSrcPort:         uint16(randInt),
+		srcPortLock:         sync.Mutex{},
+		portForwardingTable: make(map[uint16]*PortForwardingRule),
+	}
+	for _, pf := range pfs {
+		for i := pf.ExternalPortStart; i <= pf.ExternalPortEnd; i++ {
+			n.portForwardingTable[i] = &pf
+		}
 	}
 
-	for _, r := range rest {
+	for _, r := range lans {
 		n.interfaces[r.If.IfName] = r
 	}
 	n.interfaces[defaultGateway.If.IfName] = defaultGateway
@@ -81,9 +88,11 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 	if eth.EthernetType == layers.EthernetTypeIPv4 {
 		ipv4, _ := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 
-		// Is it from or two our subnet? For now, not supporting any form of routing.
+		// Not from or two our interfaces - probably broadcast - routing isnt supported currently
 		if !(fromInterface.If.IPv4Network.Contains(ipv4.SrcIP) || fromInterface.If.IPv4Network.Contains(ipv4.DstIP)) {
-			if ipv4.DstIP.Equal(BroadCast) {
+
+			// Check for DHCP here, only if its enabled on this interface.
+			if ipv4.DstIP.Equal(BroadCast) && fromInterface.If.DHCPEnabled {
 				log.Info().Msgf("Broadcast packet - %v", pkt)
 				// check if its DHCP UDP
 				if ipv4.Protocol == layers.IPProtocolUDP {
@@ -92,20 +101,20 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 
 						req, err := n.dhcp.Handle(dhcpPacket.Contents, ipv4.SrcIP, int(udp.DstPort))
 						if err != nil {
-							log.Error().Msgf("Error handling DHCP packet: %v", err)
+							log.Error().Err(err).Msgf("Error handling DHCP packet: %v", err)
 							return
 						}
-						log.Info().Msgf("Handled DHCP Packet correctly - %v", n.dhcp)
+						log.Info().Msgf("Handled DHCP Packet correctly - %+v", n.dhcp)
 						err = sendDHCPResponse(eth, ipv4, udp, fromInterface, req)
 						if err != nil {
-							log.Error().Msgf("Error sending DHCP response: %v", err)
+							log.Error().Err(err).Msgf("Error sending DHCP response: %v", err)
 						}
 						return
 					}
 				}
 			}
-
-			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping.", ifName, fromInterface.If.IPv4Network, ipv4.SrcIP, ipv4.DstIP)
+			// Not from our subnets or a broadcast
+			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping.\n", ifName, fromInterface.If.IPv4Network, ipv4.SrcIP, ipv4.DstIP)
 			return
 		}
 
@@ -253,7 +262,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		dstport = uint16(udp.DstPort)
 		udp.SetNetworkLayerForChecksum(ipv4)
 	} else if protocol == layers.IPProtocolICMPv4 {
-		log.Info().Msgf("ICMP packet entering NAT.")
+		log.Debug().Msgf("ICMP packet entering NAT.")
 	} else if ipv4.Protocol == layers.IPProtocolIGMP {
 		log.Debug().Msgf("Trying to NAT IGMP. Going to pass this through, TODO - investigate")
 	} else {
@@ -275,9 +284,20 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		if tcp != nil {
 			tcp.SrcPort = layers.TCPPort(forwardEntry.SrcPort)
 			tcp.DstPort = layers.TCPPort(forwardEntry.DstPort)
+		} else if udp != nil {
+			udp.SrcPort = layers.UDPPort(forwardEntry.SrcPort)
+			udp.DstPort = layers.UDPPort(forwardEntry.DstPort)
 		}
 
 	} else if fromInterface.If.NatEnabled {
+
+		// If its addresssed to me, then its probably DNS
+		if ipv4.DstIP.Equal(fromInterface.If.IPv4Addr) {
+			if dstport == 53 {
+				// DNS, change the DST ip.
+				log.Warn().Msgf("Recieved DNS packet addressed to me on %s. Not currently supported.", fromInterface.If.IfName)
+			}
+		}
 
 		// If its TCP, only NAT when SYN is set
 		if tcp != nil && !tcp.SYN {
@@ -295,7 +315,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		}
 
 		expectedSrcPort := srcport
-		if tcp != nil {
+		if tcp != nil || udp != nil {
 			n.srcPortLock.Lock()
 			srcport = n.nextSrcPort
 			n.nextSrcPort += 1
@@ -303,7 +323,11 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 				n.nextSrcPort = uint16(srcPortMin)
 			}
 			n.srcPortLock.Unlock()
-			tcp.SrcPort = layers.TCPPort(srcport)
+			if tcp != nil {
+				tcp.SrcPort = layers.TCPPort(srcport)
+			} else {
+				udp.SrcPort = layers.UDPPort(srcport)
+			}
 
 		}
 
@@ -316,6 +340,9 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		n.table.Store(reverseKey, reverseEntry)
 		log.Debug().Msgf("New NAT (forward) for %s - %s", fromInterface.If.IfName, natkey)
 		log.Debug().Msgf("New NAT (reverse) for %s - %s", fromInterface.If.IfName, reverseKey)
+	} else if !fromInterface.If.NatEnabled {
+		// Check if the packet is in the port forward table
+		return
 	} else {
 		return
 	}

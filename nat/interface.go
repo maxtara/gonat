@@ -19,6 +19,7 @@ type Interface struct {
 	IPv4Network net.IPNet
 	IPv4Gateway net.IP
 	NatEnabled  bool
+	DHCPEnabled bool
 	// isUp bool
 	// isRunning bool
 	// isLoopback bool

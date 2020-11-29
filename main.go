@@ -32,7 +32,7 @@ func getMacAddr(name string) (string, error) {
 type interfaceNames []string
 
 func (i *interfaceNames) String() string {
-	return "my string representation"
+	return fmt.Sprintf("%v", *i)
 }
 
 func (i *interfaceNames) Set(value string) error {
@@ -42,8 +42,10 @@ func (i *interfaceNames) Set(value string) error {
 
 func main() {
 	var lanInterfaces interfaceNames
+	var portfrules nat.PortForwardingRules
 	loglvlStr := flag.String("v", "debug", "debug level")
 	flag.Var(&lanInterfaces, "lan", "Name of the LAN interfaces.")
+	flag.Var(&portfrules, "pf", "Port Forwarding rules. In the format ip,tcp|udp,externalstart<-end>,internalstart. Eg, 10.0.0.2,tcp,2000,2000, or 10.0.0.2,udp,2000-2001,3000")
 	wanIntName := flag.String("wan", "eth1", "Name of WAN interface")
 	lanAddrStr := flag.String("lancidr", "10.0.0.1/8", "Network address of LAN interfaces")
 	wanAddr := flag.String("wandcidr", "192.168.1.80/24", "Network address WAN interface")
@@ -91,15 +93,16 @@ func main() {
 		IPv4Network: *wanCidr,
 		IPv4Gateway: common.Int2ip(common.Ip2int(wanIP.Mask(wanCidr.Mask)) + 1), // Assume the gateway is the first address in the subnet,
 		NatEnabled:  false,
+		DHCPEnabled: false,
 	}
 	wanInterfaceSet := nat.IfSet{
 		If:       wanInterface,
 		Callback: nat.CreateSpitter(*wanIntName, false),
 	}
 
-	nat := nat.CreateNat(wanInterfaceSet, lansets)
+	nat := nat.CreateNat(wanInterfaceSet, lansets, portfrules)
 
-	log.Info().Msgf("Starting NAT on (lan) - %s and (wan) - %s\n\nListening on %s, using %s", lanInterfaces, *wanIntName, listeningStr, wanInterfaceSet.If.IPv4Addr)
+	log.Info().Msgf("Starting NAT on (lan) - %s and (wan) - %s\nListening on %s, using %s\nPort Forwarding rules: %+v", lanInterfaces, *wanIntName, listeningStr, wanInterfaceSet.If.IPv4Addr, &portfrules)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
@@ -121,7 +124,14 @@ func getInterfaces(if1Name string, ip net.IP, network net.IPNet) (source nat.Sou
 	}
 	hw1, _ := net.ParseMAC(if1Mac)
 
-	if1 := nat.Interface{IfName: if1Name, IfHWAddr: hw1, IPv4Addr: ip, IPv4Netmask: network.Mask, IPv4Network: network, NatEnabled: true}
+	if1 := nat.Interface{IfName: if1Name,
+		IfHWAddr:    hw1,
+		IPv4Addr:    ip,
+		IPv4Netmask: network.Mask,
+		IPv4Network: network,
+		NatEnabled:  true,
+		DHCPEnabled: true,
+	}
 	set = nat.IfSet{If: if1, Callback: spitter1}
 
 	return

@@ -83,7 +83,7 @@ func TestSimple(t *testing.T) {
 		},
 		Callback: nattest{ifno: 1},
 	}
-	n := CreateNat(gwSet, []IfSet{fromInterface})
+	n := CreateNat(gwSet, []IfSet{fromInterface}, []PortForwardingRule{})
 	t.Logf("yay %v", n)
 	// Add arp entries
 	// n.updateArpTable(hw, iptest)
