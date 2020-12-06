@@ -42,7 +42,7 @@ type Nat struct {
 	dhcp                dhcp.DHCPHandler
 	nextSrcPort         uint16
 	srcPortLock         sync.Mutex
-	portForwardingTable map[uint16]*PortForwardingRule
+	portForwardingTable map[PortForwardingKey]PortForwardingEntry
 }
 
 func CreateNat(defaultGateway IfSet, lans []IfSet, pfs []PortForwardingRule) (n *Nat) {
@@ -56,11 +56,21 @@ func CreateNat(defaultGateway IfSet, lans []IfSet, pfs []PortForwardingRule) (n 
 		arpNotify:           ARPNotify{},
 		nextSrcPort:         uint16(randInt),
 		srcPortLock:         sync.Mutex{},
-		portForwardingTable: make(map[uint16]*PortForwardingRule),
+		portForwardingTable: make(map[PortForwardingKey]PortForwardingEntry),
 	}
 	for _, pf := range pfs {
-		for i := pf.ExternalPortStart; i <= pf.ExternalPortEnd; i++ {
-			n.portForwardingTable[i] = &pf
+		rangePorts := pf.ExternalPortEnd - pf.ExternalPortStart
+		for i := uint16(0); i <= rangePorts; i++ {
+
+			key := PortForwardingKey{
+				ExternalPort: uint16(i),
+				Protocol:     pf.Protocol,
+			}
+			n.portForwardingTable[key] = PortForwardingEntry{
+				InternalPort: i,
+				InternalIP:   pf.InternalIP,
+			}
+
 		}
 	}
 
@@ -289,20 +299,37 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 			udp.DstPort = layers.UDPPort(forwardEntry.DstPort)
 		}
 
-	} else if fromInterface.If.NatEnabled {
+	} else {
+		// Not natted previously - find a new NAT if
+		// 1. we're on a NAT enabled port
+		// 2. the dst port is in the port forward table.
 
-		// If its addresssed to me, then its probably DNS
-		if ipv4.DstIP.Equal(fromInterface.If.IPv4Addr) {
-			if dstport == 53 {
-				// DNS, change the DST ip.
-				log.Warn().Msgf("Recieved DNS packet addressed to me on %s. Not currently supported.", fromInterface.If.IfName)
-			}
+		// If its addresssed to me (non WAN interface), then its probably DNS.
+		if dstport == 53 && fromInterface.If.NatEnabled && ipv4.DstIP.Equal(fromInterface.If.IPv4Addr) {
+			// DNS - TODO
+			log.Warn().Msgf("Recieved DNS packet addressed to me on %s. Not currently supported.", fromInterface.If.IfName)
 		}
 
-		// If its TCP, only NAT when SYN is set
-		if tcp != nil && !tcp.SYN {
-			log.Error().Msgf("Will not initiate a NAT when the TCP SYN flag is not set %s", pkt)
+		// // If its TCP, only NAT when SYN is set
+		// if tcp != nil && !tcp.SYN {
+		// 	log.Error().Msgf("Will not initiate a NAT when the TCP SYN flag is not set %s", pkt)
+		// 	return
+		// }
+
+		if !fromInterface.If.NatEnabled {
+			// Unseen packet on the non nat interface.
+			// Check if the packet is in the port forward table
+			pfkey := PortForwardingKey{ExternalPort: dstport, Protocol: protocol}
+			entry, ok := n.portForwardingTable[pfkey]
+			if !ok {
+				log.Debug().Msgf("Dropping pkt %s on %s as its not in the port forwarding table", natkey, fromInterface.If.IfName)
+				return
+			}
+			log.Info().Msgf("New packet matches port forwarding rule: %+v  ---- %+v", pfkey, entry)
 			return
+			// entry.
+		} else {
+
 		}
 
 		// New NAT
@@ -314,6 +341,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 			return
 		}
 
+		// Choose a new src port
 		expectedSrcPort := srcport
 		if tcp != nil || udp != nil {
 			n.srcPortLock.Lock()
@@ -337,14 +365,10 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		// Create both entries. Each hold a reference to a key of the reverse direction.
 		forwardEntry = &NatEntry{SrcPort: srcport, SrcIP: ipv4.SrcIP, Inf: toInterface, DstPort: dstport, DstIP: ipv4.DstIP, DstMac: eth.DstMAC, ReverseKey: &reverseKey}
 		reverseEntry := &NatEntry{SrcPort: dstport, DstPort: expectedSrcPort, SrcIP: ipv4.DstIP, Inf: &fromInterface, DstIP: originalSourceIP, DstMac: eth.SrcMAC, ReverseKey: &natkey}
+
 		n.table.Store(reverseKey, reverseEntry)
 		log.Debug().Msgf("New NAT (forward) for %s - %s", fromInterface.If.IfName, natkey)
 		log.Debug().Msgf("New NAT (reverse) for %s - %s", fromInterface.If.IfName, reverseKey)
-	} else if !fromInterface.If.NatEnabled {
-		// Check if the packet is in the port forward table
-		return
-	} else {
-		return
 	}
 
 	// NAT Layer 2

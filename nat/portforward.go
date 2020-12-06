@@ -12,18 +12,26 @@ import (
 type PortForwardingRules []PortForwardingRule
 
 type PortForwardingRule struct {
-	ToIP              net.IP
+	InternalIP        net.IP
 	ExternalPortStart uint16
 	ExternalPortEnd   uint16
 	InternalPortStart uint16
 	InternalPortEnd   uint16
 	Protocol          layers.IPProtocol
 }
+type PortForwardingEntry struct {
+	InternalIP   net.IP
+	InternalPort uint16
+}
+type PortForwardingKey struct {
+	ExternalPort uint16
+	Protocol     layers.IPProtocol
+}
 
 func (i *PortForwardingRules) String() string {
 	var s string
 	for _, v := range *i {
-		s += fmt.Sprintf("%s,%s,%d-%d,%d-%d", v.ToIP, v.Protocol, v.ExternalPortStart, v.ExternalPortEnd, v.InternalPortStart, v.InternalPortEnd)
+		s += fmt.Sprintf("%s,%s,%d-%d,%d-%d", v.InternalIP, v.Protocol, v.ExternalPortStart, v.ExternalPortEnd, v.InternalPortStart, v.InternalPortEnd)
 	}
 	return s
 }
@@ -73,8 +81,8 @@ func (pf *PortForwardingRules) Set(value string) (err error) {
 		return fmt.Errorf("invalid protocol %s", parts[1])
 	}
 
-	i.ToIP = net.ParseIP(parts[0])
-	if i.ToIP == nil {
+	i.InternalIP = net.ParseIP(parts[0])
+	if i.InternalIP == nil {
 		return fmt.Errorf("invalid ip -  %s", parts[0])
 	}
 

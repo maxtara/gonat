@@ -48,13 +48,7 @@ func TestSimple(t *testing.T) {
 	globalTestHolder = t
 	close(testChat)
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(zerolog.DebugLevel)
-	// n := Nat{
-	// 	interfaces: make(map[string]IfSet),
-	// 	arpTable:   sync.Map{},
-	// 	table:      Nattable{},
-	// }
-	//
-	//CreatePacketTCP(t require.TestingT, srcport, dstport uint16) (packet gopacket.Packet) {
+
 	pkt := common.CreatePacketIPTCP(t, ip2, net.IPv4(8, 8, 8, 8), 2222, 443, common.TCPFlags{SYN: true})
 	ipv4, _ := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 	eth := pkt.LinkLayer().(*layers.Ethernet)
@@ -85,10 +79,7 @@ func TestSimple(t *testing.T) {
 	}
 	n := CreateNat(gwSet, []IfSet{fromInterface}, []PortForwardingRule{})
 	t.Logf("yay %v", n)
-	// Add arp entries
-	// n.updateArpTable(hw, iptest)
-	// n.updateArpTable(hw, ipgw)
-	// Run some tests
+
 	t.Log("############### TEST 1. Testing ARP #################")
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
@@ -187,7 +178,7 @@ func TestSimple(t *testing.T) {
 	require.Equal(t, dstipout.To4(), net.IPv4(8, 8, 8, 8).To4())
 
 	// Create the reverse packet
-	t.Log("############### TEST 2. PING return #################")
+	t.Log("############### TEST 3. PING return #################")
 	pkt = common.CreateICMPPacket(t, net.IPv4(8, 8, 8, 8), ip1, false)
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
@@ -200,9 +191,30 @@ func TestSimple(t *testing.T) {
 	require.Equal(t, srcipout.To4(), net.IPv4(8, 8, 8, 8).To4())
 	require.Equal(t, dstipout.To4(), ip2.To4())
 
-	// Wait, just in case
-	// time.Sleep(50 * time.Millisecond)
-	// require.Nil(t, globalPacketHolder[1])
+	t.Log("############### TEST 4. Port forwarding. Drop packet with no rule #################")
+	n.table.DeleteAll()
+	pkt = common.CreatePacketIPTCP(t, net.IPv4(8, 8, 8, 8), ip1, 4444, 5555, common.TCPFlags{SYN: true})
+	globalPacketHolder[0] = nil
+	globalPacketHolder[1] = nil
+	n.AcceptPkt(pkt, "eth0")
+	require.Nil(t, globalPacketHolder[0])
+	require.Nil(t, globalPacketHolder[1])
+
+	// t.Log("############### TEST 4. Port forwarding. Forward the packet #################")
+	// n.table.DeleteAll()
+	// n.portForwardingTable[PortForwardingKey{ExternalPort: 5555, Protocol: layers.IPProtocolTCP}] = PortForwardingEntry{InternalIP: ip2, InternalPort: 4444}
+	// pkt = common.CreatePacketIPTCP(t, net.IPv4(8, 8, 8, 8), ip1, 3333, 5555, common.TCPFlags{SYN: true})
+	// globalPacketHolder[0] = nil
+	// globalPacketHolder[1] = nil
+	// n.AcceptPkt(pkt, "eth0")
+	// require.Nil(t, globalPacketHolder[0])
+	// require.NotNil(t, globalPacketHolder[1])
+	// srcipout, dstipout, srcportout, dstportout = decodeTCPPacket(t, globalPacketHolder[1])
+
+	// require.Equal(t, srcipout.To4(), net.IPv4(8, 8, 8, 8).To4())
+	// require.Equal(t, dstipout.To4(), ip2.To4())
+	// require.Equal(t, srcportout, uint16(3333))
+	// require.Equal(t, dstportout, uint16(4444))
 
 }
 
