@@ -77,4 +77,5 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
 DNS?
 port forwarding. Static. Upnp?
 ipv6? ipv6 only?
+3 letter domains? 4?
 ```

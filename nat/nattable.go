@@ -48,7 +48,7 @@ type NatEntry struct {
 	LastSeen         time.Time
 	SrcPort, DstPort uint16
 	SrcIP, DstIP     net.IP
-	Inf              *IfSet
+	Inf              *Interface
 	DstMac           net.HardwareAddr
 	ReverseKey       *NatKey
 	TcpState         TCPCloseState
@@ -159,5 +159,5 @@ func (k NatKey) String() string {
 	return fmt.Sprintf("(%s:%d->%s:%d)", k.SrcIP, k.SrcPort, k.DstIP, k.DstPort)
 }
 func (e NatEntry) String() string {
-	return fmt.Sprintf("(%s== %s:%d->%s:%d)", e.Inf.If.IfName, e.SrcIP, e.SrcPort, e.DstIP, e.DstPort)
+	return fmt.Sprintf("(%s== %s:%d->%s:%d)", e.Inf.IfName, e.SrcIP, e.SrcPort, e.DstIP, e.DstPort)
 }

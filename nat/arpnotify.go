@@ -18,25 +18,32 @@ import (
 // This is a little bit of a hack, but it works.
 // The main thing to note is that we're using a single thread to handle all of the ARP responses.
 
+type ArpEntry struct {
+	Mac     net.HardwareAddr
+	IntName string
+}
+
+var EmptyArpEntry = ArpEntry{}
+
 type ARPNotify struct {
 	// The ARP response channel
 	arpChan    chan net.IP
 	arpWaiters map[string]chan bool
 	lock       sync.Mutex
-	arpTable   sync.Map // [mac]net.IP
+	arpTable   sync.Map // [mac]ArpEntry
 }
 
-func (a *ARPNotify) AddArpEntry(ip net.IP, mac net.HardwareAddr) {
-	a.arpTable.Store(ip.String(), mac)
+func (a *ARPNotify) AddArpEntry(ip net.IP, mac net.HardwareAddr, interfaceName string) {
+	a.arpTable.Store(ip.String(), ArpEntry{Mac: mac, IntName: interfaceName})
 	a.arpChan <- ip
 }
 
-func (a *ARPNotify) GetArpEntry(ip net.IP) (net.HardwareAddr, bool) {
+func (a *ARPNotify) GetArpEntry(ip net.IP) (ArpEntry, bool) {
 	entry, ok := a.arpTable.Load(ip.String())
 	if !ok {
-		return nil, false
+		return ArpEntry{}, false
 	}
-	return entry.(net.HardwareAddr), true
+	return entry.(ArpEntry), true
 }
 
 func (a *ARPNotify) Close() {
@@ -60,7 +67,7 @@ func (a *ARPNotify) Init() {
 
 // WaitForArp - if there is an entry in the arp table, return immediately.
 
-func (a *ARPNotify) WaitForArp(ipNet net.IP) (mac net.HardwareAddr, ok bool) {
+func (a *ARPNotify) WaitForArp(ipNet net.IP) (mac ArpEntry, ok bool) {
 
 	mac, ok = a.GetArpEntry(ipNet)
 	if ok {

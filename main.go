@@ -4,89 +4,80 @@ import (
 	"flag"
 	"fmt"
 	"gonat/common"
+	"gonat/dhcp"
 	"gonat/nat"
 	"net"
 	"os"
 	"sync"
 
+	_ "github.com/google/gopacket/layers"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
-
-	_ "github.com/google/gopacket/layers"
+	"gopkg.in/yaml.v3"
 )
 
-func getMacAddr(name string) (string, error) {
-	ifas, err := net.Interfaces()
-	if err != nil {
-		return "", err
-	}
-	for _, ifa := range ifas {
-		if ifa.Name == name {
-			return ifa.HardwareAddr.String(), nil
-		}
-
-	}
-	return "", nat.ErrNoInterfaceFound
+type LanInterface struct {
+	Name string `yaml:"name"`
+	Addr string `yaml:"addr"`
 }
 
-type interfaceNames []string
-
-func (i *interfaceNames) String() string {
-	return fmt.Sprintf("%v", *i)
-}
-
-func (i *interfaceNames) Set(value string) error {
-	*i = append(*i, value)
-	return nil
+type Config struct {
+	LanInterfaces []LanInterface `yaml:"lan"`
+	WanInterface  struct {
+		Name string `yaml:"name"`
+		Addr string `yaml:"addr"`
+	} `yaml:"wan"`
+	PFRules []nat.PFRule `yaml:"portForwardingRules"`
 }
 
 func main() {
-	var lanInterfaces interfaceNames
-	var portfrules nat.PortForwardingRules
 	loglvlStr := flag.String("v", "debug", "debug level")
-	flag.Var(&lanInterfaces, "lan", "Name of the LAN interfaces.")
-	flag.Var(&portfrules, "pf", "Port Forwarding rules. In the format ip,tcp|udp,externalstart<-end>,internalstart. Eg, 10.0.0.2,tcp,2000,2000, or 10.0.0.2,udp,2000-2001,3000")
-	wanIntName := flag.String("wan", "eth1", "Name of WAN interface")
-	lanAddrStr := flag.String("lancidr", "10.0.0.1/8", "Network address of LAN interfaces")
-	wanAddr := flag.String("wandcidr", "192.168.1.80/24", "Network address WAN interface")
+	configStr := flag.String("c", "config.yaml", "config location")
 	flag.Parse()
 	loglvl, err := zerolog.ParseLevel(*loglvlStr)
 	if err != nil {
 		panic("Failed to parse log level, try debug")
 	}
-	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(loglvl)
-
-	wanSniffer := nat.CreateSniffer(*wanIntName, false)
-
-	wanMac, err := getMacAddr(*wanIntName)
+	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(loglvl).With().Timestamp().Logger().With().Caller().Logger()
+	f, err := os.Open(*configStr)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to find devices")
+		log.Fatal().Err(err).Msgf("Failed to open config %s", *configStr)
+	}
+	defer f.Close()
+
+	var cfg Config
+	decoder := yaml.NewDecoder(f)
+	err = decoder.Decode(&cfg)
+	if err != nil {
+		log.Fatal().Err(err).Msgf("Failed to parse config '%s'", *configStr)
+	}
+	log.Debug().Msgf("Config: %+v", cfg)
+	wanSniffer := nat.CreateSniffer(cfg.WanInterface.Name, false)
+
+	wanMac, err := common.GetMacAddr(cfg.WanInterface.Name)
+	if err != nil {
+		log.Fatal().Err(err).Msgf("Failed to find device '%s'", cfg.WanInterface.Name)
 	}
 
 	hwWan, _ := net.ParseMAC(wanMac)
 
-	wanIP, wanCidr, err := net.ParseCIDR(*wanAddr)
+	wanIP, wanCidr, err := net.ParseCIDR(cfg.WanInterface.Addr)
 	if err != nil || wanIP == nil {
-		log.Fatal().Msgf("Failed to parse override address - should be a subnet %s", *wanAddr)
+		log.Fatal().Msgf("Failed to parse override address - should be a subnet %s", cfg.WanInterface.Addr)
 	}
 
-	lanIP, lanAddr, err := net.ParseCIDR(*lanAddrStr)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to find devices")
-	}
-
-	var lansets []nat.IfSet
+	var lansets []nat.Interface
 	var lanSources []nat.Source
 	listeningStr := ""
-	for _, lanInterface := range lanInterfaces {
-		s1, if1s := getInterfaces(lanInterface, lanIP, *lanAddr)
+	for _, lanInterface := range cfg.LanInterfaces {
+		s1, if1s := getInterfaces(lanInterface)
 		lansets = append(lansets, if1s)
 		lanSources = append(lanSources, s1)
-		listeningStr += if1s.If.IPv4Addr.String() + " "
+		listeningStr += if1s.IPv4Addr.String() + " "
 	}
 
-	wanInterface := nat.Interface{
-		IfName:      *wanIntName,
+	wanInterfaceSet := nat.Interface{
+		IfName:      cfg.WanInterface.Name,
 		IfHWAddr:    hwWan,
 		IPv4Addr:    wanIP,
 		IPv4Netmask: wanCidr.Mask,
@@ -94,45 +85,57 @@ func main() {
 		IPv4Gateway: common.Int2ip(common.Ip2int(wanIP.Mask(wanCidr.Mask)) + 1), // Assume the gateway is the first address in the subnet,
 		NatEnabled:  false,
 		DHCPEnabled: false,
-	}
-	wanInterfaceSet := nat.IfSet{
-		If:       wanInterface,
-		Callback: nat.CreateSpitter(*wanIntName, false),
+		Callback:    nat.CreateSpitter(cfg.WanInterface.Name, false),
 	}
 
-	nat := nat.CreateNat(wanInterfaceSet, lansets, portfrules)
+	for _, pfrule := range cfg.PFRules {
+		if pfrule.Protocol != "tcp" && pfrule.Protocol != "udp" {
+			log.Fatal().Msgf("Invalid protocol %s", pfrule.Protocol)
+		}
+		endTmp := pfrule.InternalPortStart + (pfrule.ExternalPortEnd - pfrule.ExternalPortStart)
+		if pfrule.InternalPortStart > endTmp {
+			log.Fatal().Msgf("Invalid port range for %+v", pfrule)
+		}
 
-	log.Info().Msgf("Starting NAT on (lan) - %s and (wan) - %s\nListening on %s, using %s\nPort Forwarding rules: %+v", lanInterfaces, *wanIntName, listeningStr, wanInterfaceSet.If.IPv4Addr, &portfrules)
+	}
+	nat := nat.CreateNat(wanInterfaceSet, lansets, cfg.PFRules)
+
+	log.Info().Msgf("Starting NAT on (lan) - %s and (wan) - %s\nListening on %s, using %s\nPort Forwarding rules: %+v", cfg.LanInterfaces, cfg.WanInterface.Name, listeningStr, wanInterfaceSet.IPv4Addr, cfg.PFRules)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)
-	go wanSniffer.Start(nat, fmt.Sprintf("ether src not %s", wanInterface.IfHWAddr)) // BPF filter to remove packets sent _from_ gonat
+	go wanSniffer.Start(nat, fmt.Sprintf("ether src not %s", wanInterfaceSet.IfHWAddr)) // BPF filter to remove packets sent _from_ gonat
 	for i, lanSource := range lanSources {
 		wg.Add(1)
-		go lanSource.Start(nat, fmt.Sprintf("ether src not %s", lansets[i].If.IfHWAddr)) // BPF filter to remove packets sent _from_ gonat
+		go lanSource.Start(nat, fmt.Sprintf("ether src not %s", lansets[i].IfHWAddr)) // BPF filter to remove packets sent _from_ gonat
 	}
 	wg.Wait()
 }
 
-func getInterfaces(if1Name string, ip net.IP, network net.IPNet) (source nat.Source, set nat.IfSet) {
+func getInterfaces(lan LanInterface) (source nat.Source, set nat.Interface) {
+	lanIP, lanAddr, err := net.ParseCIDR(lan.Addr)
+	if err != nil {
+		log.Fatal().Err(err).Msg("Failed to find devices")
+	}
 
-	source = nat.CreateSniffer(if1Name, false)
-	spitter1 := nat.CreateSpitter(if1Name, false)
-	if1Mac, err := getMacAddr(if1Name)
+	source = nat.CreateSniffer(lan.Name, false)
+	spitter1 := nat.CreateSpitter(lan.Name, false)
+	if1Mac, err := common.GetMacAddr(lan.Name)
 	if err != nil {
 		log.Fatal().Err(err).Msg("Failed to find devices")
 	}
 	hw1, _ := net.ParseMAC(if1Mac)
 
-	if1 := nat.Interface{IfName: if1Name,
+	set = nat.Interface{IfName: lan.Name,
 		IfHWAddr:    hw1,
-		IPv4Addr:    ip,
-		IPv4Netmask: network.Mask,
-		IPv4Network: network,
+		IPv4Addr:    lanIP,
+		IPv4Netmask: lanAddr.Mask,
+		IPv4Network: *lanAddr,
 		NatEnabled:  true,
 		DHCPEnabled: true,
+		Callback:    spitter1,
+		DHCPHandler: dhcp.NewDHCPHandler(lanIP, *lanAddr, 100),
 	}
-	set = nat.IfSet{If: if1, Callback: spitter1}
 
 	return
 

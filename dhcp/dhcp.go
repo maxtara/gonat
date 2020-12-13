@@ -2,6 +2,7 @@ package dhcp
 
 import (
 	"errors"
+	"fmt"
 
 	dhcp "github.com/krolaw/dhcp4"
 
@@ -11,30 +12,24 @@ import (
 )
 
 var (
-	ErrDHCPParse = errors.New("Error parsing DHCP packet")
+	ErrDHCPParse = errors.New("error parsing dhcp packet")
 )
 
 // Example using DHCP with a single network interface device
-func NewDHCPHandler() DHCPHandler {
-	serverIP := net.IP{10, 00, 0, 1}
-	return DHCPHandler{
+func NewDHCPHandler(serverIP net.IP, serverNet net.IPNet, leaseCount int) *DHCPHandler {
+	start := dhcp.IPAdd(serverIP, 1)
+	return &DHCPHandler{
 		ip:            serverIP,
 		leaseDuration: 2 * time.Hour,
-		start:         net.IP{10, 0, 0, 3},
-		leaseRange:    50,
-		leases:        make(map[int]lease, 100),
+		start:         start,
+		leaseRange:    leaseCount,
+		leases:        make(map[int]lease, leaseCount),
 		options: dhcp.Options{
-			dhcp.OptionSubnetMask:       []byte{255, 0, 0, 0},
-			dhcp.OptionRouter:           []byte(serverIP),               // Presuming Server is also your router
+			dhcp.OptionSubnetMask:       serverNet.Mask,
+			dhcp.OptionRouter:           serverIP.To4(),                 // Presuming Server is also your router
 			dhcp.OptionDomainNameServer: []byte{0x08, 0x08, 0x08, 0x08}, // Presuming Server is also your DNS server
 		},
 	}
-	// err := dhcp.ListenAndServe(handler)
-	// if err != nil {
-	// 	log.Fatal().Err(err).Msg("Error starting dhcpserver")
-	// }
-	// // log.Fatal(dhcp.Serve(dhcp.NewUDP4BoundListener("eth0",":67"), handler)) // Select interface on multi interface device - just linux for now
-	// // log.Fatal(dhcp.Serve(dhcp.NewUDP4FilterListener("en0",":67"), handler)) // Work around for other OSes
 }
 
 type lease struct {
@@ -49,6 +44,10 @@ type DHCPHandler struct {
 	leaseRange    int           // Number of IPs to distribute (starting from start)
 	leaseDuration time.Duration // Lease period
 	leases        map[int]lease // Map to keep track of leases
+}
+
+func (h *DHCPHandler) String() string {
+	return fmt.Sprintf("&DHCPHandler{%+v, %+v, %+v, %+v, %+v}", h.ip, h.start, h.leaseRange, h.leaseDuration, h.options)
 }
 
 func (h *DHCPHandler) Handle(buffer []byte, ip net.IP, port int) (d dhcp.Packet, err error) {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
-	"gonat/dhcp"
 	"math/rand"
 	"net"
 	"sync"
@@ -29,29 +28,27 @@ var (
 	srcPortMax          = 60000
 )
 
-type IfSet struct {
-	If       Interface
-	Callback Dest
-}
+// type Interface struct {
+// 	If       Interface
+// 	Callback Dest
+// }
 
 type Nat struct {
 	table               Nattable
-	interfaces          map[string]IfSet
-	defaultGateway      IfSet
+	interfaces          map[string]Interface
+	defaultGateway      Interface
 	arpNotify           ARPNotify
-	dhcp                dhcp.DHCPHandler
 	nextSrcPort         uint16
 	srcPortLock         sync.Mutex
 	portForwardingTable map[PortForwardingKey]PortForwardingEntry
 }
 
-func CreateNat(defaultGateway IfSet, lans []IfSet, pfs []PortForwardingRule) (n *Nat) {
+func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat) {
 	rand.Seed(time.Now().UnixNano())
 	randInt := rand.Intn(srcPortMax-srcPortMin) + srcPortMin
 	n = &Nat{
 		defaultGateway:      defaultGateway,
-		interfaces:          make(map[string]IfSet),
-		dhcp:                dhcp.NewDHCPHandler(),
+		interfaces:          make(map[string]Interface),
 		table:               Nattable{},
 		arpNotify:           ARPNotify{},
 		nextSrcPort:         uint16(randInt),
@@ -60,24 +57,29 @@ func CreateNat(defaultGateway IfSet, lans []IfSet, pfs []PortForwardingRule) (n 
 	}
 	for _, pf := range pfs {
 		rangePorts := pf.ExternalPortEnd - pf.ExternalPortStart
+		var protocol layers.IPProtocol
+		if pf.Protocol == "tcp" {
+			protocol = layers.IPProtocolTCP
+		} else {
+			protocol = layers.IPProtocolUDP
+		}
 		for i := uint16(0); i <= rangePorts; i++ {
-
 			key := PortForwardingKey{
-				ExternalPort: uint16(i),
-				Protocol:     pf.Protocol,
+				ExternalPort: pf.ExternalPortStart + i,
+				Protocol:     protocol,
 			}
 			n.portForwardingTable[key] = PortForwardingEntry{
-				InternalPort: i,
-				InternalIP:   pf.InternalIP,
+				InternalPort: pf.InternalPortStart + i,
+				InternalIP:   net.ParseIP(pf.InternalIP),
 			}
-
+			log.Debug().Msgf("port forwarding rule %v:%v", key, n.portForwardingTable[key])
 		}
 	}
 
 	for _, r := range lans {
-		n.interfaces[r.If.IfName] = r
+		n.interfaces[r.IfName] = r
 	}
-	n.interfaces[defaultGateway.If.IfName] = defaultGateway
+	n.interfaces[defaultGateway.IfName] = defaultGateway
 	go n.table.StartGarbageCollector()
 	n.arpNotify.Init()
 	return
@@ -99,23 +101,23 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		ipv4, _ := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 
 		// Not from or two our interfaces - probably broadcast - routing isnt supported currently
-		if !(fromInterface.If.IPv4Network.Contains(ipv4.SrcIP) || fromInterface.If.IPv4Network.Contains(ipv4.DstIP)) {
+		if !(fromInterface.IPv4Network.Contains(ipv4.SrcIP) || fromInterface.IPv4Network.Contains(ipv4.DstIP)) {
 
 			// Check for DHCP here, only if its enabled on this interface.
-			if ipv4.DstIP.Equal(BroadCast) && fromInterface.If.DHCPEnabled {
+			if ipv4.DstIP.Equal(BroadCast) && fromInterface.DHCPEnabled {
 				log.Info().Msgf("Broadcast packet - %v", pkt)
 				// check if its DHCP UDP
 				if ipv4.Protocol == layers.IPProtocolUDP {
 					udp, _ := pkt.Layer(layers.LayerTypeUDP).(*layers.UDP)
 					if dhcpPacket, ok := pkt.Layer(layers.LayerTypeDHCPv4).(*layers.DHCPv4); ok {
 
-						req, err := n.dhcp.Handle(dhcpPacket.Contents, ipv4.SrcIP, int(udp.DstPort))
+						req, err := fromInterface.DHCPHandler.Handle(dhcpPacket.Contents, ipv4.SrcIP, int(udp.DstPort))
 						if err != nil {
 							log.Error().Err(err).Msgf("Error handling DHCP packet: %v", err)
 							return
 						}
-						log.Info().Msgf("Handled DHCP Packet correctly - %+v", n.dhcp)
-						err = sendDHCPResponse(eth, ipv4, udp, fromInterface, req)
+						log.Info().Msgf("Handled DHCP Packet correctly - %+v", fromInterface.DHCPHandler)
+						err = sendDHCPResponse(eth, ipv4, udp, &fromInterface, req)
 						if err != nil {
 							log.Error().Err(err).Msgf("Error sending DHCP response: %v", err)
 						}
@@ -124,7 +126,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 				}
 			}
 			// Not from our subnets or a broadcast
-			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping.\n", ifName, fromInterface.If.IPv4Network, ipv4.SrcIP, ipv4.DstIP)
+			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping.\n", ifName, fromInterface.IPv4Network, ipv4.SrcIP, ipv4.DstIP)
 			return
 		}
 
@@ -136,10 +138,10 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		// Check if its icmp, and its addressed to ourself
 		if ipv4.Protocol == layers.IPProtocolICMPv4 {
 			icmp, _ := pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-			if ipv4.DstIP.Equal(fromInterface.If.IPv4Addr) {
+			if ipv4.DstIP.Equal(fromInterface.IPv4Addr) {
 				// Make sure its a request to
 				if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoRequest {
-					if err := sendICMPResponse(ipv4, icmp, eth, pkt, fromInterface); err != nil {
+					if err := sendICMPResponse(ipv4, icmp, eth, pkt, &fromInterface); err != nil {
 						log.Error().Err(err).Msgf("failed to send packet %s", err)
 					}
 					return // Sent packet or error'd. Dont NAT, return.
@@ -156,7 +158,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		}
 
 		// Probably a NAT'able packet from here on
-		if err := n.natPacket(pkt, ipv4, eth, fromInterface); err != nil {
+		if err := n.natPacket(pkt, ipv4, eth, &fromInterface); err != nil {
 			log.Error().Err(err).Msgf("failed to NAT packet %s", pkt)
 		}
 		return
@@ -167,8 +169,8 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		arp, _ := pkt.Layer(layers.LayerTypeARP).(*layers.ARP)
 		log.Debug().Msgf("Arg message receieved-  %+v", arp)
 
-		if fromInterface.If.IPv4Addr.Equal(arp.DstProtAddress) && arp.Operation == 1 { // 1 is ARPRequest
-			if err := sendARPResponse(arp, eth, pkt, fromInterface); err != nil {
+		if fromInterface.IPv4Addr.Equal(arp.DstProtAddress) && arp.Operation == 1 { // 1 is ARPRequest
+			if err := sendARPResponse(arp, eth, pkt, &fromInterface); err != nil {
 				log.Error().Err(err).Msgf("failed to send packet %s", err)
 			}
 			return // Sent packet or error'd. Dont NAT, return.
@@ -176,14 +178,14 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		} else {
 			// Else, some other ARP message. Lets just update the ARP table from the messages regardless of who its for. No possible poising issue here. updateArpTable checks for zero byte macs
 			log.Debug().Msgf("ARP message seen. Updating table. %v:%v, %v:%v", arp.SourceHwAddress, arp.SourceProtAddress, arp.DstHwAddress, arp.DstProtAddress)
-			n.updateArpTable(arp.SourceHwAddress, arp.SourceProtAddress)
-			n.updateArpTable(arp.DstHwAddress, arp.DstProtAddress)
+			n.updateArpTable(arp.SourceHwAddress, arp.SourceProtAddress, fromInterface.IfName)
+			n.updateArpTable(arp.DstHwAddress, arp.DstProtAddress, fromInterface.IfName)
 		}
 	} else {
 		log.Info().Msgf("Some other pkt type - %d. Currently unsupported - %s", eth.EthernetType, pkt)
 	}
 }
-func sendICMPResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface IfSet) (err error) {
+func sendICMPResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface *Interface) (err error) {
 	// Flip the packet around, and send it pack. Shortcut to generating an ICMP packet.
 	oldEth := ipv4.DstIP
 	ipv4.DstIP = ipv4.SrcIP
@@ -198,13 +200,13 @@ func sendICMPResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Ethern
 
 }
 
-func sendDHCPResponse(eth *layers.Ethernet, ipv4 *layers.IPv4, udp *layers.UDP, fromInterface IfSet, content []byte) (err error) {
+func sendDHCPResponse(eth *layers.Ethernet, ipv4 *layers.IPv4, udp *layers.UDP, fromInterface *Interface, content []byte) (err error) {
 	// Set layer 2
 	eth.DstMAC = eth.SrcMAC
-	eth.SrcMAC = fromInterface.If.IfHWAddr
+	eth.SrcMAC = fromInterface.IfHWAddr
 
 	// Set layer 3
-	ipv4.SrcIP = fromInterface.If.IPv4Addr
+	ipv4.SrcIP = fromInterface.IPv4Addr
 
 	// Set layer 4
 	oldIp := udp.DstPort
@@ -222,7 +224,7 @@ func sendDHCPResponse(eth *layers.Ethernet, ipv4 *layers.IPv4, udp *layers.UDP, 
 	return fromInterface.Callback.SendBytes(buffer.Bytes())
 }
 
-func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface IfSet) (err error) {
+func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface *Interface) (err error) {
 	// Generate ARP response
 	arp.Operation = layers.ARPReply
 	// Swap the protocol addresses
@@ -231,7 +233,7 @@ func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt gopacket.Packet,
 	arp.DstProtAddress = old
 	// src moves to dst. Dst is set
 	arp.DstHwAddress = arp.SourceHwAddress
-	arp.SourceHwAddress = fromInterface.If.IfHWAddr
+	arp.SourceHwAddress = fromInterface.IfHWAddr
 	// Same for the ethernet level. Already swapped, so set them to same as the arp entry
 	eth.SrcMAC = arp.SourceHwAddress
 	eth.DstMAC = arp.DstHwAddress
@@ -240,7 +242,7 @@ func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt gopacket.Packet,
 	// Double checking there are no ZERO byte MAC addresses. Can cause some pain
 	if bytes.Equal(arp.DstHwAddress, zeroHWAddr) ||
 		bytes.Equal(arp.SourceHwAddress, zeroHWAddr) ||
-		bytes.Equal(fromInterface.If.IfHWAddr, zeroHWAddr) {
+		bytes.Equal(fromInterface.IfHWAddr, zeroHWAddr) {
 		log.Fatal().Msgf("ARP Response has invalid data. %v", pkt)
 	} else {
 		err = fromInterface.Callback.Send(pkt)
@@ -249,11 +251,11 @@ func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt gopacket.Packet,
 }
 
 // natPacket - I'm going to blindly trust that the layer4 protocol will decode. Trusting that gopacket when lazy=false
-func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterface IfSet) (err error) {
+func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterface *Interface) (err error) {
 	var srcport, dstport uint16
 	var tcp *layers.TCP
 	var udp *layers.UDP
-	var toInterface *IfSet
+	var toInterface *Interface
 	originalSourceIP := ipv4.SrcIP
 	protocol := ipv4.Protocol
 
@@ -278,7 +280,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 	} else {
 		log.Warn().Msgf("Trying to NAT unsupported protocol. You better hope a layer 2/3 NAT works. - %s", pkt)
 	}
-	log.Debug().Msgf("Input packet - %s==(%s:%d->%s:%d)", fromInterface.If.IfName, ipv4.SrcIP, srcport, ipv4.DstIP, dstport)
+	log.Debug().Msgf("Input packet - %s==(%s:%d->%s:%d)", fromInterface.IfName, ipv4.SrcIP, srcport, ipv4.DstIP, dstport)
 	// Unique Tuple for this packet
 	natkey := NatKey{SrcPort: srcport, DstPort: dstport, SrcIP: ipv4.SrcIP.String(), DstIP: ipv4.DstIP.String(), Protocol: protocol}
 	// Decide if we should nat the packet. First check if we would NAT this packet anyway
@@ -305,9 +307,9 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		// 2. the dst port is in the port forward table.
 
 		// If its addresssed to me (non WAN interface), then its probably DNS.
-		if dstport == 53 && fromInterface.If.NatEnabled && ipv4.DstIP.Equal(fromInterface.If.IPv4Addr) {
+		if dstport == 53 && fromInterface.NatEnabled && ipv4.DstIP.Equal(fromInterface.IPv4Addr) {
 			// DNS - TODO
-			log.Warn().Msgf("Recieved DNS packet addressed to me on %s. Not currently supported.", fromInterface.If.IfName)
+			log.Warn().Msgf("Recieved DNS packet addressed to me on %s. Not currently supported.", fromInterface.IfName)
 		}
 
 		// // If its TCP, only NAT when SYN is set
@@ -315,34 +317,55 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		// 	log.Error().Msgf("Will not initiate a NAT when the TCP SYN flag is not set %s", pkt)
 		// 	return
 		// }
-
-		if !fromInterface.If.NatEnabled {
+		originalSrcPort := srcport
+		originalDstPort := dstport
+		originalDstIp := ipv4.DstIP
+		var expectedDstIP net.IP
+		if !fromInterface.NatEnabled {
 			// Unseen packet on the non nat interface.
 			// Check if the packet is in the port forward table
 			pfkey := PortForwardingKey{ExternalPort: dstport, Protocol: protocol}
 			entry, ok := n.portForwardingTable[pfkey]
 			if !ok {
-				log.Debug().Msgf("Dropping pkt %s on %s as its not in the port forwarding table", natkey, fromInterface.If.IfName)
+				log.Debug().Msgf("Dropping pkt %s on %s as its not in the port forwarding table", natkey, fromInterface.IfName)
 				return
 			}
 			log.Info().Msgf("New packet matches port forwarding rule: %+v  ---- %+v", pfkey, entry)
-			return
-			// entry.
+			ipv4.DstIP = entry.InternalIP
+			tmp, errTmp := n.getEthAddr(entry.InternalIP)
+			if errTmp != nil {
+				log.Error().Err(err).Msgf("Failed to get MAC address for %s", entry.InternalIP)
+				return
+			}
+			toInterfaceTmp := n.interfaces[tmp.IntName]
+			toInterface = &toInterfaceTmp
+			eth.DstMAC = tmp.Mac
+			expectedDstIP = ipv4.SrcIP
+			dstport = entry.InternalPort
+
+			if protocol == layers.IPProtocolTCP {
+				tcp.DstPort = layers.TCPPort(entry.InternalPort)
+			} else if protocol == layers.IPProtocolUDP {
+				udp.DstPort = layers.UDPPort(entry.InternalPort)
+			}
+
 		} else {
+			ipv4.SrcIP = n.defaultGateway.IPv4Addr
+			toInterface = &n.defaultGateway
+			expectedDstIP = toInterface.IPv4Addr
+			tmp, errTmp := n.getEthAddr(toInterface.IPv4Gateway)
+			if errTmp != nil {
+				log.Error().Err(err).Msgf("Failed to get MAC address for %s", toInterface.IPv4Gateway)
+				return
+			}
+			eth.DstMAC = tmp.Mac
 
 		}
 
 		// New NAT
-		ipv4.SrcIP = n.defaultGateway.If.IPv4Addr
-		toInterface = &n.defaultGateway
-		eth.DstMAC, err = n.getEthAddr(toInterface.If.IPv4Gateway, toInterface)
-		if err != nil {
-			log.Error().Err(err).Msgf("Failed to get MAC address for %s", toInterface.If.IPv4Gateway)
-			return
-		}
 
 		// Choose a new src port
-		expectedSrcPort := srcport
+
 		if tcp != nil || udp != nil {
 			n.srcPortLock.Lock()
 			srcport = n.nextSrcPort
@@ -360,22 +383,22 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		}
 
 		// Create reverse entry key
-		reverseKey := NatKey{SrcPort: dstport, DstPort: srcport, SrcIP: ipv4.DstIP.String(), DstIP: toInterface.If.IPv4Addr.String(), Protocol: protocol}
+		reverseKey := NatKey{SrcPort: dstport, DstPort: srcport, SrcIP: ipv4.DstIP.String(), DstIP: expectedDstIP.String(), Protocol: protocol}
 
 		// Create both entries. Each hold a reference to a key of the reverse direction.
 		forwardEntry = &NatEntry{SrcPort: srcport, SrcIP: ipv4.SrcIP, Inf: toInterface, DstPort: dstport, DstIP: ipv4.DstIP, DstMac: eth.DstMAC, ReverseKey: &reverseKey}
-		reverseEntry := &NatEntry{SrcPort: dstport, DstPort: expectedSrcPort, SrcIP: ipv4.DstIP, Inf: &fromInterface, DstIP: originalSourceIP, DstMac: eth.SrcMAC, ReverseKey: &natkey}
+		reverseEntry := &NatEntry{SrcPort: originalDstPort, DstPort: originalSrcPort, SrcIP: originalDstIp, Inf: fromInterface, DstIP: originalSourceIP, DstMac: eth.SrcMAC, ReverseKey: &natkey}
 
 		n.table.Store(reverseKey, reverseEntry)
-		log.Debug().Msgf("New NAT (forward) for %s - %s", fromInterface.If.IfName, natkey)
-		log.Debug().Msgf("New NAT (reverse) for %s - %s", fromInterface.If.IfName, reverseKey)
+		log.Debug().Msgf("New NAT (forward) for %s - %s", fromInterface.IfName, natkey)
+		log.Debug().Msgf("New NAT (reverse) for %s - %s", fromInterface.IfName, reverseKey)
 	}
 
 	// NAT Layer 2
-	eth.SrcMAC = toInterface.If.IfHWAddr
+	eth.SrcMAC = toInterface.IfHWAddr
 
 	// Update packet contents
-	log.Debug().Msgf("Spitted on %s packet =  (%v)", toInterface.If.IfName, pkt)
+	log.Debug().Msgf("Spitted on %s packet =  (%v)", toInterface.IfName, pkt)
 
 	// Send packet
 	err = toInterface.Callback.Send(pkt)
@@ -389,7 +412,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 	}
 	// Update NAT table for sent packet - so next packet can use the same tuple.
 	n.table.Store(natkey, forwardEntry)
-	// log.Info().Msgf("Redo NAT for %s - %v %v", toInterface.If.IfName, natkey, forwardEntry)
+	// log.Info().Msgf("Redo NAT for %s - %v %v", toInterface.IfName, natkey, forwardEntry)
 
 	return
 }
@@ -480,19 +503,29 @@ func (n *Nat) trackTCP(forwardEntry *NatEntry, tcp *layers.TCP) {
 	}
 }
 
-func (n *Nat) getEthAddr(ip net.IP, ifset *IfSet) (net.HardwareAddr, error) {
+// getEthAddr - get the Ethernet address of the ip
+// 1. Check the ARP table
+// 2. If not found, send ARP request on all interfaces that contains the ip
+// 3. Then wait for ARP reply
+func (n *Nat) getEthAddr(ip net.IP) (ArpEntry, error) {
 
 	mac, ok := n.arpNotify.GetArpEntry(ip)
 	if !ok {
 		log.Warn().Msgf("failed to find gateway ARP entry for %s. Waiting", ip)
-		if err := n.doArp(ip, ifset.If.IfHWAddr, ifset.If.IPv4Addr); err != nil {
-			return nil, err
+
+		for _, intVal := range n.interfaces {
+			// log.Debug().Msgf("Checking %+v for %s. Waiting", intVal, ip)
+			if intVal.IPv4Network.Contains(ip) {
+				if err := n.doArp(ip, &intVal); err != nil {
+					return EmptyArpEntry, err
+				}
+			}
 		}
 
 		// Wait for either the ARP response, or a timeout.
 		mac, ok := n.arpNotify.WaitForArp(ip)
 		if !ok {
-			return nil, fmt.Errorf("ARP entry not there, even after waiting. Bad news ")
+			return EmptyArpEntry, fmt.Errorf("ARP entry not there, even after waiting. Bad news ")
 		}
 		log.Info().Msgf("Got ARP entry for %s - %s after waiting", ip, mac)
 		return mac, nil
@@ -501,18 +534,18 @@ func (n *Nat) getEthAddr(ip net.IP, ifset *IfSet) (net.HardwareAddr, error) {
 	return mac, nil
 }
 
-func (n *Nat) updateArpTable(mac net.HardwareAddr, ip net.IP) {
+func (n *Nat) updateArpTable(mac net.HardwareAddr, ip net.IP, interfaceName string) {
 
 	// If mac is not 0:0:0:0:0:0, then update ARP table.
 	if !bytes.Equal(mac, []byte{0, 0, 0, 0, 0, 0}) {
-		n.arpNotify.AddArpEntry(ip, mac)
+		n.arpNotify.AddArpEntry(ip, mac, interfaceName)
 	}
 }
-func (n *Nat) doArp(dst net.IP, srcMac net.HardwareAddr, srcip net.IP) (err error) {
-	log.Info().Msgf("Doing an ARP request for %s from %s:%s", dst, srcMac, srcip)
+func (n *Nat) doArp(dst net.IP, intf *Interface) (err error) {
+	log.Info().Msgf("Doing an ARP request for %s from %s", dst, intf.IfName)
 	// Send ARP request
 	eth := &layers.Ethernet{
-		SrcMAC:       srcMac,
+		SrcMAC:       intf.IfHWAddr,
 		DstMAC:       net.HardwareAddr{0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF},
 		EthernetType: layers.EthernetTypeARP,
 	}
@@ -523,9 +556,9 @@ func (n *Nat) doArp(dst net.IP, srcMac net.HardwareAddr, srcip net.IP) (err erro
 		HwAddressSize:     6,
 		ProtAddressSize:   4,
 		Operation:         1, // ARP Request,
-		SourceHwAddress:   srcMac,
+		SourceHwAddress:   intf.IfHWAddr,
 		DstHwAddress:      net.HardwareAddr{0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
-		SourceProtAddress: srcip.To4(),
+		SourceProtAddress: intf.IPv4Addr.To4(),
 		DstProtAddress:    dst.To4(),
 	}
 	buffer := gopacket.NewSerializeBuffer()
@@ -539,7 +572,7 @@ func (n *Nat) doArp(dst net.IP, srcMac net.HardwareAddr, srcip net.IP) (err erro
 	}
 	pkt := gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
 	log.Debug().Msgf("======= Sending %v", pkt)
-	err = n.defaultGateway.Callback.Send(pkt)
+	err = intf.Callback.Send(pkt)
 	if err != nil {
 		return
 	}

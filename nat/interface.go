@@ -1,14 +1,10 @@
 package nat
 
 import (
-	"errors"
+	"gonat/dhcp"
 	"net"
 
 	"github.com/google/gopacket"
-)
-
-var (
-	ErrNoInterfaceFound = errors.New("could not find interface with that name")
 )
 
 type Interface struct {
@@ -20,6 +16,8 @@ type Interface struct {
 	IPv4Gateway net.IP
 	NatEnabled  bool
 	DHCPEnabled bool
+	DHCPHandler *dhcp.DHCPHandler
+	Callback    Dest
 	// isUp bool
 	// isRunning bool
 	// isLoopback bool
