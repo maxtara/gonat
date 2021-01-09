@@ -55,7 +55,8 @@ type NatEntry struct {
 }
 
 type Nattable struct {
-	table sync.Map //map[NatKey]*NatEntry
+	table map[NatKey]*NatEntry
+	lock  sync.RWMutex
 }
 
 // StartGarbageCollector - clean up (remove) closed NAT entries.
@@ -63,17 +64,16 @@ type Nattable struct {
 // that packets run in smaller. I might also put some stat printing in here
 // TODO - context to close nicly
 func (n *Nattable) StartGarbageCollector() {
-	for now := range time.Tick(time.Second * 5) {
+	for now := range time.Tick(time.Second * 30) {
 		natTotal := 0
 		natDeletedCount := 0
 		natTcpClosing := 0
-		shortTimeout := now.Add(-time.Second * 10)
-		longTCPTimeout := now.Add(-time.Hour * 1)
+		shortTimeout := now.Add(-time.Minute * 5)
+		longTCPTimeout := now.Add(-time.Minute * 124) // Why 124 mins i hear you ask, check out rfc5382-REQ5.
 		var timeout time.Time
-		n.table.Range(func(key, value interface{}) bool {
+		n.lock.Lock()
+		for k, v := range n.table {
 			natTotal += 1
-			k := key.(NatKey)
-			v := value.(*NatEntry)
 			if v.TcpState.State == TCPClosed {
 				natTcpClosing += 1
 			}
@@ -84,41 +84,50 @@ func (n *Nattable) StartGarbageCollector() {
 			}
 			if timeout.After(v.LastSeen) {
 				natDeletedCount += 1
-				n.table.Delete(key.(NatKey))
+				delete(n.table, k)
 			}
-			return true
-		})
+		}
+		n.lock.Unlock()
 		log.Info().Msgf("Nat table stats. Deleted = %d, Total = %d. Closed %d", natDeletedCount, natTotal, natTcpClosing)
 
 	}
 }
 func (n *Nattable) Check(key NatKey) (ok bool) {
-	_, ok = n.table.Load(key)
+	n.lock.RLock()
+	defer n.lock.RUnlock()
+	_, ok = n.table[key]
 	return // Not going to bother checking the timeout. TCP standard just says we must nat for at least 1 hour.
 }
 func (n *Nattable) Delete(key NatKey) {
-	n.table.Delete(key)
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	delete(n.table, key)
 }
 
 // TODO. Load for an hour after a SYN-ACK / Return UDP packet?
 func (n *Nattable) Store(key NatKey, entry *NatEntry) {
 	entry.LastSeen = time.Now()
-	n.table.Store(key, entry)
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	n.table[key] = entry
+	old, ok := n.table[*entry.ReverseKey]
+	if ok {
+		old.LastSeen = time.Now()
+	}
 }
 func (n *Nattable) Get(key NatKey) *NatEntry {
-	entry, ok := n.table.Load(key)
+	n.lock.RLock()
+	entry, ok := n.table[key]
+	n.lock.RUnlock()
 	if !ok {
 		return nil
 	}
-	return entry.(*NatEntry)
+	return entry
 }
 
 func (n *Nattable) DeleteAll() {
-	n.table.Range(func(key, value interface{}) bool {
-		n.table.Delete(key)
-		return true
-	})
-
+	// Test function and not used in main code, so a shortcut here.
+	n.table = make(map[NatKey]*NatEntry)
 }
 
 func (k NatKey) Reverse() NatKey {

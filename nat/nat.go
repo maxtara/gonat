@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"gonat/common"
 	"math/rand"
 	"net"
 	"sync"
@@ -49,7 +50,7 @@ func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat
 	n = &Nat{
 		defaultGateway:      defaultGateway,
 		interfaces:          make(map[string]Interface),
-		table:               Nattable{},
+		table:               Nattable{table: make(map[NatKey]*NatEntry), lock: sync.RWMutex{}},
 		arpNotify:           ARPNotify{},
 		nextSrcPort:         uint16(randInt),
 		srcPortLock:         sync.Mutex{},
@@ -99,19 +100,19 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 
 	if eth.EthernetType == layers.EthernetTypeIPv4 {
 		ipv4, _ := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-
+		ipsrc, ipdst := common.GetIP(pkt.NetworkLayer())
 		// Not from or two our interfaces - probably broadcast - routing isnt supported currently
-		if !(fromInterface.IPv4Network.Contains(ipv4.SrcIP) || fromInterface.IPv4Network.Contains(ipv4.DstIP)) {
+		if !(fromInterface.IPv4Network.Contains(ipsrc) || fromInterface.IPv4Network.Contains(ipdst)) {
 
 			// Check for DHCP here, only if its enabled on this interface.
-			if ipv4.DstIP.Equal(BroadCast) && fromInterface.DHCPEnabled {
-				log.Info().Msgf("Broadcast packet - %v", pkt)
+			if ipdst.Equal(BroadCast) && fromInterface.DHCPEnabled {
+				log.Debug().Msgf("DHCP packet recieved - %v", pkt)
 				// check if its DHCP UDP
 				if ipv4.Protocol == layers.IPProtocolUDP {
 					udp, _ := pkt.Layer(layers.LayerTypeUDP).(*layers.UDP)
 					if dhcpPacket, ok := pkt.Layer(layers.LayerTypeDHCPv4).(*layers.DHCPv4); ok {
 
-						req, err := fromInterface.DHCPHandler.Handle(dhcpPacket.Contents, ipv4.SrcIP, int(udp.DstPort))
+						req, err := fromInterface.DHCPHandler.Handle(dhcpPacket.Contents, ipsrc, int(udp.DstPort))
 						if err != nil {
 							log.Error().Err(err).Msgf("Error handling DHCP packet: %v", err)
 							return
@@ -126,11 +127,11 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 				}
 			}
 			// Not from our subnets or a broadcast
-			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping.\n", ifName, fromInterface.IPv4Network, ipv4.SrcIP, ipv4.DstIP)
+			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping.\n", ifName, fromInterface.IPv4Network, ipsrc, ipdst)
 			return
 		}
 
-		if MultiCast.Contains(ipv4.DstIP) {
+		if MultiCast.Contains(ipdst) {
 			log.Debug().Msgf("Dropping multicast packet for now -")
 			return
 		}
@@ -138,7 +139,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		// Check if its icmp, and its addressed to ourself
 		if ipv4.Protocol == layers.IPProtocolICMPv4 {
 			icmp, _ := pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-			if ipv4.DstIP.Equal(fromInterface.IPv4Addr) {
+			if ipdst.Equal(fromInterface.IPv4Addr) {
 				// Make sure its a request to
 				if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoRequest {
 					if err := sendICMPResponse(ipv4, icmp, eth, pkt, &fromInterface); err != nil {
@@ -146,14 +147,14 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 					}
 					return // Sent packet or error'd. Dont NAT, return.
 				} else if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoReply {
-					log.Debug().Msgf("Got an ICMP response to %s:%s. Going to pass through to NAT, as its probably a clients packet - %s", ipv4.SrcIP, ipv4.DstIP, icmp.TypeCode)
+					log.Debug().Msgf("Got an ICMP response to %s:%s. Going to pass through to NAT, as its probably a clients packet - %s", ipsrc, ipdst, icmp.TypeCode)
 
 				} else {
 					log.Warn().Msgf("ICMP message sent to me, but not a request? ,Code=%s", icmp.TypeCode)
 					return
 				}
 			} else {
-				log.Debug().Msgf("Got an ICMP response to %s:%s. Code=%s", ipv4.SrcIP, ipv4.DstIP, icmp.TypeCode)
+				log.Debug().Msgf("Got an ICMP response to %s:%s. Code=%s", ipsrc, ipdst, icmp.TypeCode)
 			}
 		}
 
@@ -189,6 +190,9 @@ func sendICMPResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Ethern
 	// Flip the packet around, and send it pack. Shortcut to generating an ICMP packet.
 	oldEth := ipv4.DstIP
 	ipv4.DstIP = ipv4.SrcIP
+	// Drop the TTL. This will mean anything onwards should have the TTL down.
+	ipv4.TTL -= 1
+
 	ipv4.SrcIP = oldEth
 	icmp.TypeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, layers.ICMPv4CodeNet)
 
@@ -258,6 +262,8 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 	var toInterface *Interface
 	originalSourceIP := ipv4.SrcIP
 	protocol := ipv4.Protocol
+	// Drop the TTL. This will mean anything onwards should have the TTL down.
+	ipv4.TTL -= 1
 
 	if protocol == layers.IPProtocolTCP {
 		// Get actual TCP data from this layer
@@ -289,6 +295,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 	if forwardEntry != nil {
 		// Already natted previously - keep the same NAT
 		log.Debug().Msgf("Already NAT'e'd %s. Using old entry %v", natkey, forwardEntry)
+
 		ipv4.DstIP = forwardEntry.DstIP
 		ipv4.SrcIP = forwardEntry.SrcIP
 		toInterface = forwardEntry.Inf
@@ -363,35 +370,20 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		}
 
 		// New NAT
-
-		// Choose a new src port
-
-		if tcp != nil || udp != nil {
-			n.srcPortLock.Lock()
-			srcport = n.nextSrcPort
-			n.nextSrcPort += 1
-			if int(n.nextSrcPort) > srcPortMax {
-				n.nextSrcPort = uint16(srcPortMin)
-			}
-			n.srcPortLock.Unlock()
-			if tcp != nil {
-				tcp.SrcPort = layers.TCPPort(srcport)
-			} else {
-				udp.SrcPort = layers.UDPPort(srcport)
-			}
-
-		}
-
-		// Create reverse entry key
-		reverseKey := NatKey{SrcPort: dstport, DstPort: srcport, SrcIP: ipv4.DstIP.String(), DstIP: expectedDstIP.String(), Protocol: protocol}
-
-		// Create both entries. Each hold a reference to a key of the reverse direction.
-		forwardEntry = &NatEntry{SrcPort: srcport, SrcIP: ipv4.SrcIP, Inf: toInterface, DstPort: dstport, DstIP: ipv4.DstIP, DstMac: eth.DstMAC, ReverseKey: &reverseKey}
+		// Create reverse entry key. If its TCP or UDP, find a source port that matches the RFC
+		// holds a reference to a key of the forward direction.
 		reverseEntry := &NatEntry{SrcPort: originalDstPort, DstPort: originalSrcPort, SrcIP: originalDstIp, Inf: fromInterface, DstIP: originalSourceIP, DstMac: eth.SrcMAC, ReverseKey: &natkey}
-
-		n.table.Store(reverseKey, reverseEntry)
+		reverseKey := n.chooseSrcPort(dstport, srcport, &ipv4.DstIP, &expectedDstIP, &protocol, reverseEntry, 0)
+		srcport = reverseKey.DstPort
+		if tcp != nil {
+			tcp.SrcPort = layers.TCPPort(srcport)
+		} else if udp != nil {
+			udp.SrcPort = layers.UDPPort(srcport)
+		}
+		// Create new forward entries. hold a reference to a key of the reverse direction.
+		forwardEntry = &NatEntry{SrcPort: srcport, SrcIP: ipv4.SrcIP, Inf: toInterface, DstPort: dstport, DstIP: ipv4.DstIP, DstMac: eth.DstMAC, ReverseKey: reverseKey}
 		log.Debug().Msgf("New NAT (forward) for %s - %s", fromInterface.IfName, natkey)
-		log.Debug().Msgf("New NAT (reverse) for %s - %s", fromInterface.IfName, reverseKey)
+
 	}
 
 	// NAT Layer 2
@@ -415,6 +407,38 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 	// log.Info().Msgf("Redo NAT for %s - %v %v", toInterface.IfName, natkey, forwardEntry)
 
 	return
+}
+
+// chooseSrcPort. Tries to pick a source port to use. Try the actual source port first (called 'port preservation' in the RFC).
+// If that fails, pick a port in the same range (0-1023 or 1024-65535 - rfc4787 REQ3), and keep parity (rfc4787 REQ4)
+func (n *Nat) chooseSrcPort(p1, selectPort uint16, i1, i2 *net.IP, prot *layers.IPProtocol, entry *NatEntry, recursionCount int) (tryKey *NatKey) {
+	tryKey = &NatKey{SrcPort: p1, DstPort: selectPort, SrcIP: i1.String(), DstIP: i2.String(), Protocol: *prot}
+	n.table.lock.Lock()
+
+	_, ok := n.table.table[*tryKey]
+	if !ok { // Entry not in table, safe to create then retunr
+		n.table.table[*tryKey] = entry
+		n.table.lock.Unlock()
+		log.Debug().Msgf("New NAT (reverse) for %s - %s", entry.Inf.IfName, tryKey)
+
+		return
+	}
+	// Entry already in table, try to find a port in the same range, and keep parity
+	log.Warn().Msgf("key %v already in the nat table, this should be very uncommon, and could be a sign of a bug. Incrementing %d", *tryKey, selectPort)
+
+	// Wrap source port to keep it in the correct range, and correct parity, before incrementing via two and recusing.
+	if selectPort >= 1021 && selectPort <= 1023 {
+		selectPort -= 1018
+	} else if selectPort >= 65533 && selectPort <= 65535 {
+		selectPort -= 64510
+	}
+
+	if recursionCount > 10 {
+		log.Warn().Msgf("Recursive limit exceeded, definately a big issue.")
+	}
+
+	n.table.lock.Unlock()
+	return n.chooseSrcPort(p1, selectPort+2, i1, i2, prot, entry, recursionCount+1)
 }
 
 // trackTCPSimple - I implemented the actual 3 or 4 way handshake (trackTCP)

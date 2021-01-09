@@ -86,14 +86,6 @@ func CreatePacketIPTCP(t require.TestingT, src, dst net.IP, srcport, dstport uin
 	return
 }
 
-func getIPs(t require.TestingT, pkt gopacket.Packet) (net.IP, net.IP) {
-	ipLayer := pkt.Layer(layers.LayerTypeIPv4)
-	require.NotNil(t, ipLayer)
-	ipv4, _ := ipLayer.(*layers.IPv4)
-	require.NotNil(t, ipv4)
-	return ipv4.SrcIP, ipv4.DstIP
-}
-
 func CreateICMPPacket(t require.TestingT, src, dst net.IP, isRequest bool) (packet gopacket.Packet) {
 
 	ethernetLayer := &layers.Ethernet{
@@ -141,4 +133,9 @@ func ConvertPacket(pkt gopacket.Packet) []byte {
 	}
 
 	return buf.Bytes()
+}
+
+func GetIP(flow gopacket.NetworkLayer) (net.IP, net.IP) {
+	f := flow.NetworkFlow()
+	return net.IP(f.Src().Raw()), net.IP(f.Dst().Raw())
 }

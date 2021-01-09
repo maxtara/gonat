@@ -1,6 +1,29 @@
 # GoNAT
-
-## Notes
+  
+## Description
+  
+Simple pure go implemenation of a NAT, using gopacket for packet parsing and network IO.
+This could potentially work as a simple home NAT, if you have a seperate modem.
+  
+## Features / notes
+  
+  * UDP/TCP/IP NAT'ing
+  * Port forwarding, via a simple YAML configuration file
+  * Multiple LAN interfaces (same network, or different)
+  * Single WAN interface
+  * DHCP server, additionally can setup static IP entries
+  * Mostly RFC compliant (details below)
+  * Supports IPv4 only.
+  * FTP not supported.
+  * Fragmentation not supported.
+  
+## Development enviroment setup
+  
+My dev enviroment uses two LAN networks, one virtual 'veth' for simple testing, and a seperate network, which can *only* access the internet using the NAT. I run multiple VMs on that network.
+    * eth1 is the WAN interface
+    * eth2 is the LAN interface (connected to the VMs)
+    * veth0/veth1 is the virtual network. The NAT side is veth1, the client side is veth0 - which gets an ip address.
+  
 ```
 # Create a virtual interface
 ip link add veth0 type veth peer name veth1
@@ -36,6 +59,10 @@ ethtool -K eth1 tso off
 ethtool -K eth1 gso off
 ethtool -K eth1 gro off
 
+ethtool -K eth2 tso off
+ethtool -K eth2 gso off
+ethtool -K eth2 gro off
+
 ethtool -K veth1 tso off
 ethtool -K veth1 gso off
 ethtool -K veth1 gro off
@@ -43,16 +70,10 @@ ethtool -K veth1 gro off
 ethtool -K veth0 tso off
 ethtool -K veth0 gso off
 ethtool -K veth0 gro off
-
-
 ```
-
-### Plans
-  * First version
-    * One interface to NAT from (no hairpinning). Has an IP address on the interface. Replies to pings and arp requests.
-    * One interface to NAT to, using the already configured interface..
-
+  
 ### Speed test
+  
 ```
 # Add a route for speedtest.net get from ping speedtest.net. /16 - as it seems to change a bit
 ip route add 151.101.0.0/16 via 10.0.0.1
@@ -60,22 +81,62 @@ ip route add 151.101.0.0/16 via 10.0.0.1
 ip route add 103.22.144.0/24 via 10.0.0.1
 # using YLess4U
 speedtest-cli --server 37133 
-# using Internode CBR
+# using Internode, for comparison
 speedtest-cli --server 2166 
-
 ```
-
+  
 ### Latency test
+  
 ```
 ip route add 8.8.8.8/8 via 10.0.0.1
 ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100 
-
 ```
-
-#### TODO next
-```
-DNS?
-port forwarding. Static. Upnp?
-ipv6? ipv6 only?
-3 letter domains? 4?
-```
+  
+#### Possible Next features
+  
+  * DNS
+  * Upnp
+  * port knocking
+  
+# RFC compliance
+  
+## rfc4787
+  * REQ-1 : Done
+  * REQ-2 : Done
+  * REQ-3 : Done 
+  * REQ-3b: Done 
+  * REQ-4 : Done
+  * REQ-5 : Done
+  * REQ-6 : Done
+  * REQ-7 : Done
+  * REQ-8 : Done
+  * REQ-9 : TODO - Hairpinning? Routing between LAN interfaces using an external ip.
+  * REQ-10: Done 
+  * REQ-11: Done
+  * REQ-12: TODO - ICMP Destination Unreachable Behavior, send the ICMP destination unreachable back to originator. Rewrite header
+  * REQ-13: TODO - If the packet received on an internal IP address has DF=1,the NAT MUST send back an ICMP message "Fragmentation needed andDF set" to the host, as described in [RFC0792].
+  * REQ-14: TODO - IP Fragementation. 
+  
+## rfc5382. Some of these are not included, as they are identical to those in rfc4787.
+  * REQ-2 : Done
+  * REQ-3 : Done
+  * REQ-4 : Done 
+  * REQ-5 : Done
+  * REQ-6 : Done, except for FTP.
+  * REQ-9 : TODO: SHOULD translate Unreachable (Type 3) messages.
+  * REQ-10: Done
+  
+## rfc5508. Some of these are not included, as they are identical to those in rfc4787/rfc5382
+  * REQ-1    : Done
+  * REQ-2    : Done
+  * REQ-3    : N/a. I think this is left to gopacket.
+  * REQ-4    : TODO, Mostly done via gopacket, will be done once below REQ5 is done i think.
+  * REQ-5    : TODO, un-nat layer 4 ICMP Error packet
+  * REQ-6    : Done. 
+  * REQ-7    : TODO - Hairpin ICMP, and ICMP error packet contents
+  * REQ-8    : N/a
+  * REQ-9    : Done.
+  * REQ-10a1 : Fragmentation, todo (maybe)
+  * REQ-10a2 : TODO - send "Time Exceeded" ICMP error when ttl =0
+  * REQ-10b/d: TODO, lots of ICMP messages
+  * REQ-11   : Done

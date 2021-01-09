@@ -16,9 +16,16 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type StaticDHCPEntry struct {
+	IP  string `yaml:"ip"`
+	MAC string `yaml:"mac"`
+}
+
 type LanInterface struct {
-	Name string `yaml:"name"`
-	Addr string `yaml:"addr"`
+	Name              string            `yaml:"name"`
+	Addr              string            `yaml:"addr"`
+	DHCPEnabled       bool              `yaml:"dhcp"`
+	StaticDHCPEntries []StaticDHCPEntry `yaml:"staticDhcpEntries"`
 }
 
 type Config struct {
@@ -70,6 +77,14 @@ func main() {
 	var lanSources []nat.Source
 	listeningStr := ""
 	for _, lanInterface := range cfg.LanInterfaces {
+		_, tmp, _ := net.ParseCIDR(lanInterface.Addr)
+		if err != nil {
+			log.Fatal().Err(err).Msgf("Bad addr for interface %v", lanInterface)
+		}
+
+		if common.Intersect(tmp, wanCidr) {
+			log.Fatal().Err(err).Msgf("Lan interfaces and WAN interfaces cant intersect at all - %v and %v", lanInterface, wanCidr)
+		}
 		s1, if1s := getInterfaces(lanInterface)
 		lansets = append(lansets, if1s)
 		lanSources = append(lanSources, s1)
@@ -115,7 +130,7 @@ func main() {
 func getInterfaces(lan LanInterface) (source nat.Source, set nat.Interface) {
 	lanIP, lanAddr, err := net.ParseCIDR(lan.Addr)
 	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to find devices")
+		log.Fatal().Err(err).Msgf("Bad addr for interface %v", lan)
 	}
 
 	source = nat.CreateSniffer(lan.Name, false)
@@ -132,9 +147,21 @@ func getInterfaces(lan LanInterface) (source nat.Source, set nat.Interface) {
 		IPv4Netmask: lanAddr.Mask,
 		IPv4Network: *lanAddr,
 		NatEnabled:  true,
-		DHCPEnabled: true,
+		DHCPEnabled: lan.DHCPEnabled,
 		Callback:    spitter1,
 		DHCPHandler: dhcp.NewDHCPHandler(lanIP, *lanAddr, 100),
+	}
+
+	for _, dhcpentry := range lan.StaticDHCPEntries {
+		ip := net.ParseIP(dhcpentry.IP)
+		hw, err := net.ParseMAC(dhcpentry.MAC)
+		if err != nil || ip == nil {
+			log.Fatal().Err(err).Msgf("Bad static dhcp entry %s:%s", dhcpentry.IP, dhcpentry.MAC)
+		}
+		err = set.DHCPHandler.AddEntry(hw, ip)
+		if err != nil {
+			log.Fatal().Err(err).Msg("Failed to add static dhcp entry")
+		}
 	}
 
 	return

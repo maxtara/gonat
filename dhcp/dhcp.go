@@ -3,10 +3,11 @@ package dhcp
 import (
 	"errors"
 	"fmt"
+	"gonat/common"
+	"math/rand"
 
 	dhcp "github.com/krolaw/dhcp4"
 
-	"math/rand"
 	"net"
 	"time"
 )
@@ -44,6 +45,17 @@ type DHCPHandler struct {
 	leaseRange    int           // Number of IPs to distribute (starting from start)
 	leaseDuration time.Duration // Lease period
 	leases        map[int]lease // Map to keep track of leases
+}
+
+func (h *DHCPHandler) AddEntry(nic net.HardwareAddr, ip net.IP) (err error) {
+	if !dhcp.IPInRange(h.start, dhcp.IPAdd(h.start, h.leaseRange-1), ip) {
+		return errors.New("ip out of range")
+	}
+	wantInt := common.Ip2int(ip.To4())
+	wantIndex := wantInt - common.Ip2int(h.start.To4())
+	h.leases[int(wantIndex)] = lease{nic: nic.String(), expiry: time.Now().Add(1<<63 - 1)}
+
+	return
 }
 
 func (h *DHCPHandler) String() string {

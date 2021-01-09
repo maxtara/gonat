@@ -18,3 +18,7 @@ func Int2ip(nn uint32) net.IP {
 	binary.BigEndian.PutUint32(ip, nn)
 	return ip
 }
+
+func Intersect(n1, n2 *net.IPNet) bool {
+	return n2.Contains(n1.IP) || n1.Contains(n2.IP)
+}

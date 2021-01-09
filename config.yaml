@@ -1,18 +1,21 @@
 lan:
   - name: veth1
     addr: 10.0.0.1/8
+    dhcp: false
   - name: eth2
     addr: 172.15.2.1/24
-
+    dhcp: true
+    staticDhcpEntries:
+      - ip: 172.15.2.10
+        mac: 00:15:5d:13:30:21
 wan:
   name: eth1
   addr: 192.168.1.80/24
-
 portForwardingRules:
   - name: testing
     internalPortStart: 3000 # end is implied
     externalPortStart: 2000
     externalPortEnd: 2010
     protocol: tcp
-    internalIP: 172.15.2.98
+    internalIP: 172.15.2.10
 
