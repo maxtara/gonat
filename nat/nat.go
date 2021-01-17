@@ -37,6 +37,7 @@ var (
 type Nat struct {
 	table               Nattable
 	interfaces          map[string]Interface
+	internalRoutes      []net.IPNet
 	defaultGateway      Interface
 	arpNotify           ARPNotify
 	nextSrcPort         uint16
@@ -50,6 +51,7 @@ func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat
 	n = &Nat{
 		defaultGateway:      defaultGateway,
 		interfaces:          make(map[string]Interface),
+		internalRoutes:      make([]net.IPNet, len(lans)),
 		table:               Nattable{table: make(map[NatKey]*NatEntry), lock: sync.RWMutex{}},
 		arpNotify:           ARPNotify{},
 		nextSrcPort:         uint16(randInt),
@@ -79,6 +81,7 @@ func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat
 
 	for _, r := range lans {
 		n.interfaces[r.IfName] = r
+		n.internalRoutes = append(n.internalRoutes, r.IPv4Network)
 	}
 	n.interfaces[defaultGateway.IfName] = defaultGateway
 	go n.table.StartGarbageCollector()
@@ -136,13 +139,36 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 			return
 		}
 
+		if ipv4.TTL == 0 {
+			log.Debug().Msgf("Dropping packet with TTL 0, sending Time Exceeded back")
+			if err := sendICMPPacketReverse(ipv4, eth, &fromInterface, layers.ICMPv4CodeTTLExceeded); err != nil {
+				log.Error().Err(err).Msgf("failed to send packet %s", err)
+			}
+			return
+
+		} else if fromInterface.NatEnabled && (ipv4.Flags&layers.IPv4DontFragment == layers.IPv4DontFragment) {
+			// rfc4787 - REQ-13
+			lenPkt := len(pkt.Data())
+			if lenPkt > n.defaultGateway.MTU {
+				if err := sendICMPPacketReverse(ipv4, eth, &fromInterface, layers.ICMPv4CodeFragmentationNeeded); err != nil {
+					log.Error().Err(err).Msgf("failed to send packet %s", err)
+				}
+				return
+			}
+		}
+
+		if ipv4.Flags&layers.IPv4MoreFragments == layers.IPv4MoreFragments || ipv4.FragOffset > 0 {
+			log.Warn().Msgf("Dropping pkt with frag offset not zero")
+			return
+		}
+
 		// Check if its icmp, and its addressed to ourself
 		if ipv4.Protocol == layers.IPProtocolICMPv4 {
 			icmp, _ := pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
 			if ipdst.Equal(fromInterface.IPv4Addr) {
 				// Make sure its a request to
 				if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoRequest {
-					if err := sendICMPResponse(ipv4, icmp, eth, pkt, &fromInterface); err != nil {
+					if err := sendICMPEchoResponse(ipv4, icmp, eth, pkt, &fromInterface); err != nil {
 						log.Error().Err(err).Msgf("failed to send packet %s", err)
 					}
 					return // Sent packet or error'd. Dont NAT, return.
@@ -155,6 +181,17 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 				}
 			} else {
 				log.Debug().Msgf("Got an ICMP response to %s:%s. Code=%s", ipsrc, ipdst, icmp.TypeCode)
+			}
+		}
+
+		// Check if its from and to a LAN interface
+		if fromInterface.NatEnabled {
+			for _, route := range n.internalRoutes {
+				if route.Contains(ipdst) {
+					log.Debug().Msgf("Packet to %s:%s is internal. Sending straight out the right interface", ipsrc, ipdst)
+					n.routeInternally(ipv4, eth, pkt)
+					return
+				}
 			}
 		}
 
@@ -186,7 +223,33 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		log.Info().Msgf("Some other pkt type - %d. Currently unsupported - %s", eth.EthernetType, pkt)
 	}
 }
-func sendICMPResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface *Interface) (err error) {
+func (n *Nat) routeInternally(ipv4 *layers.IPv4, eth *layers.Ethernet, pkt gopacket.Packet) (err error) {
+	arpEntry, err := n.getEthAddr(ipv4.DstIP)
+	if err != nil {
+		log.Error().Err(err).Msgf("Failed to get eth addr for %s", ipv4.DstIP)
+		return
+	}
+	eth.DstMAC = arpEntry.Mac
+	toInterface, ok := n.interfaces[arpEntry.IntName]
+	if !ok {
+		log.Error().Msgf("Interface %s not found", arpEntry.IntName)
+		return
+	}
+	eth.SrcMAC = toInterface.IfHWAddr
+
+	return toInterface.Callback.Send(pkt)
+
+}
+
+func sendICMPPacketReverse(ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterface *Interface, code uint8) error {
+	buf, err := common.CreateICMPPacket(eth.DstMAC, eth.SrcMAC, ipv4.DstIP, ipv4.SrcIP, code, 0)
+	if err != nil {
+		return err
+	}
+	return fromInterface.Callback.SendBytes(buf)
+}
+
+func sendICMPEchoResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface *Interface) (err error) {
 	// Flip the packet around, and send it pack. Shortcut to generating an ICMP packet.
 	oldEth := ipv4.DstIP
 	ipv4.DstIP = ipv4.SrcIP
@@ -328,7 +391,13 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		originalDstPort := dstport
 		originalDstIp := ipv4.DstIP
 		var expectedDstIP net.IP
-		if !fromInterface.NatEnabled {
+		if !fromInterface.NatEnabled || n.defaultGateway.IPv4Addr.Equal(ipv4.DstIP) {
+
+			// Hairpin
+			if fromInterface.NatEnabled && n.defaultGateway.IPv4Addr.Equal(ipv4.DstIP) {
+				ipv4.SrcIP = n.defaultGateway.IPv4Addr
+			}
+
 			// Unseen packet on the non nat interface.
 			// Check if the packet is in the port forward table
 			pfkey := PortForwardingKey{ExternalPort: dstport, Protocol: protocol}
@@ -356,6 +425,9 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 				udp.DstPort = layers.UDPPort(entry.InternalPort)
 			}
 
+			// } else if n.defaultGateway.IPv4Addr.Equal(ipv4.DstIP) {
+			// 	log.Info().Msg("Hairpinned packet session initiated")
+			// 	return
 		} else {
 			ipv4.SrcIP = n.defaultGateway.IPv4Addr
 			toInterface = &n.defaultGateway

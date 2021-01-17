@@ -66,6 +66,11 @@ func main() {
 		log.Fatal().Err(err).Msgf("Failed to find device '%s'", cfg.WanInterface.Name)
 	}
 
+	wanMTU, err := common.GetMacMTU(cfg.WanInterface.Name)
+	if err != nil {
+		log.Fatal().Err(err).Msgf("Failed to find device '%s'", cfg.WanInterface.Name)
+	}
+
 	hwWan, _ := net.ParseMAC(wanMac)
 
 	wanIP, wanCidr, err := net.ParseCIDR(cfg.WanInterface.Addr)
@@ -97,6 +102,7 @@ func main() {
 		IPv4Addr:    wanIP,
 		IPv4Netmask: wanCidr.Mask,
 		IPv4Network: *wanCidr,
+		MTU:         wanMTU,
 		IPv4Gateway: common.Int2ip(common.Ip2int(wanIP.Mask(wanCidr.Mask)) + 1), // Assume the gateway is the first address in the subnet,
 		NatEnabled:  false,
 		DHCPEnabled: false,
@@ -115,7 +121,7 @@ func main() {
 	}
 	nat := nat.CreateNat(wanInterfaceSet, lansets, cfg.PFRules)
 
-	log.Info().Msgf("Starting NAT on (lan) - %s and (wan) - %s\nListening on %s, using %s\nPort Forwarding rules: %+v", cfg.LanInterfaces, cfg.WanInterface.Name, listeningStr, wanInterfaceSet.IPv4Addr, cfg.PFRules)
+	log.Info().Msgf("Starting NAT on (lan) - %v and (wan) - %s\nListening on %s, using %s\nPort Forwarding rules: %+v", cfg.LanInterfaces, cfg.WanInterface.Name, listeningStr, wanInterfaceSet.IPv4Addr, cfg.PFRules)
 
 	wg := sync.WaitGroup{}
 	wg.Add(1)

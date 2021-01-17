@@ -86,11 +86,11 @@ func CreatePacketIPTCP(t require.TestingT, src, dst net.IP, srcport, dstport uin
 	return
 }
 
-func CreateICMPPacket(t require.TestingT, src, dst net.IP, isRequest bool) (packet gopacket.Packet) {
+func CreateICMPPacket(srcmac, dstmac net.HardwareAddr, src, dst net.IP, icmpType, icmpCode uint8) ([]byte, error) {
 
 	ethernetLayer := &layers.Ethernet{
-		SrcMAC:       net.HardwareAddr{0x00, 0x0F, 0xAA, 0xFA, 0xAA, 0x00},
-		DstMAC:       net.HardwareAddr{0x00, 0x0D, 0xBD, 0xBD, 0x00, 0xBD},
+		SrcMAC:       srcmac,
+		DstMAC:       dstmac,
 		EthernetType: layers.EthernetTypeIPv4,
 	}
 	ipLayer := &layers.IPv4{
@@ -104,15 +104,7 @@ func CreateICMPPacket(t require.TestingT, src, dst net.IP, isRequest bool) (pack
 		TTL:        64,
 		Protocol:   layers.IPProtocolICMPv4,
 	}
-	var icmpLayer *layers.ICMPv4
-	if isRequest {
-		icmpLayer = &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoRequest, 0)}
-	} else {
-		icmpLayer = &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, 1)}
-	}
-
-	// icmpLayer.SetNetworkLayerForChecksum(ipLayer)
-	// And create the packet with the layers
+	icmpLayer := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(icmpType, icmpCode)}
 	buffer := gopacket.NewSerializeBuffer()
 	err := gopacket.SerializeLayers(buffer, options,
 		ethernetLayer,
@@ -120,8 +112,18 @@ func CreateICMPPacket(t require.TestingT, src, dst net.IP, isRequest bool) (pack
 		icmpLayer,
 		gopacket.Payload(rawBytes),
 	)
+	if err != nil {
+		log.Error().Err(err).Msg("Error serializing ICMP packet")
+		return nil, err
+	}
+	return buffer.Bytes(), err
+}
+
+func CreateICMPPacketTest(t require.TestingT, src, dst net.IP, icmpType, icmpCode uint8) (packet gopacket.Packet) {
+	buffer, err := CreateICMPPacket(net.HardwareAddr{0x00, 0x0F, 0xAA, 0xFA, 0xAA, 0x00}, net.HardwareAddr{0x00, 0x0D, 0xBD, 0xBD, 0x00, 0xBD}, src, dst, icmpType, icmpCode)
+
 	require.Nil(t, err)
-	packet = gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
+	packet = gopacket.NewPacket(buffer, layers.LayerTypeEthernet, gopacket.Default)
 	return
 }
 

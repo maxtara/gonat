@@ -10,13 +10,14 @@ This could potentially work as a simple home NAT, if you have a seperate modem.
   * UDP/TCP/IP NAT'ing
   * Port forwarding, via a simple YAML configuration file
   * Multiple LAN interfaces (same network, or different)
+  * Routing between LAN interfaces
   * Single WAN interface
-  * DHCP server, additionally can setup static IP entries
+  * Optional DHCP server on each LAN interface, additionally can setup static IP entries
   * Mostly RFC compliant (details below)
   * Supports IPv4 only.
   * FTP not supported.
   * Fragmentation not supported.
-  
+    
 ## Development enviroment setup
   
 My dev enviroment uses two LAN networks, one virtual 'veth' for simple testing, and a seperate network, which can *only* access the internet using the NAT. I run multiple VMs on that network.
@@ -97,6 +98,7 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
   * DNS
   * Upnp
   * port knocking
+  * Timeout ARP entries
   
 # RFC compliance
   
@@ -110,11 +112,11 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
   * REQ-6 : Done
   * REQ-7 : Done
   * REQ-8 : Done
-  * REQ-9 : TODO - Hairpinning? Routing between LAN interfaces using an external ip.
+  * REQ-9 : Done
   * REQ-10: Done 
   * REQ-11: Done
-  * REQ-12: TODO - ICMP Destination Unreachable Behavior, send the ICMP destination unreachable back to originator. Rewrite header
-  * REQ-13: TODO - If the packet received on an internal IP address has DF=1,the NAT MUST send back an ICMP message "Fragmentation needed andDF set" to the host, as described in [RFC0792].
+  * REQ-12: Done
+  * REQ-13: Done
   * REQ-14: TODO - IP Fragementation. 
   
 ## rfc5382. Some of these are not included, as they are identical to those in rfc4787.
@@ -137,6 +139,6 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
   * REQ-8    : N/a
   * REQ-9    : Done.
   * REQ-10a1 : Fragmentation, todo (maybe)
-  * REQ-10a2 : TODO - send "Time Exceeded" ICMP error when ttl =0
+  * REQ-10a2 : Done
   * REQ-10b/d: TODO, lots of ICMP messages
   * REQ-11   : Done

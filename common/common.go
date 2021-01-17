@@ -22,3 +22,17 @@ func GetMacAddr(name string) (string, error) {
 	}
 	return "", ErrNoInterfaceFound
 }
+
+func GetMacMTU(name string) (int, error) {
+	ifas, err := net.Interfaces()
+	if err != nil {
+		return -1, err
+	}
+	for _, ifa := range ifas {
+		if ifa.Name == name {
+			return ifa.MTU, nil
+		}
+
+	}
+	return -1, ErrNoInterfaceFound
+}

@@ -18,6 +18,7 @@ type Interface struct {
 	DHCPEnabled bool
 	DHCPHandler *dhcp.DHCPHandler
 	Callback    Dest
+	MTU         int
 	// isUp bool
 	// isRunning bool
 	// isLoopback bool
@@ -27,7 +28,6 @@ type Interface struct {
 	// isSecondary bool
 	// isMulticast bool
 	// isMtuSet bool
-	// mtu int
 }
 
 // Source - a source of packets. Interface to make it easier to test with.
