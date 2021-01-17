@@ -1,10 +1,14 @@
 lan:
   - name: veth1
     addr: 10.0.0.1/8
-    dhcp: false
+    dhcp: 
+      enabled: false
   - name: eth2
     addr: 172.15.2.1/24
-    dhcp: true
+    dhcp: 
+      enabled: true
+      start: 172.15.2.2
+      count: 20
     staticDhcpEntries:
       - ip: 172.15.2.10
         mac: 00:15:5d:13:30:21
@@ -16,6 +20,12 @@ portForwardingRules:
     internalPortStart: 3000 # end is implied
     externalPortStart: 2000
     externalPortEnd: 2010
+    protocol: tcp
+    internalIP: 172.15.2.10
+  - name: ssh
+    internalPortStart: 22 # end is implied
+    externalPortStart: 44
+    externalPortEnd: 44
     protocol: tcp
     internalIP: 172.15.2.10
 

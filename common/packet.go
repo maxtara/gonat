@@ -11,7 +11,7 @@ import (
 
 var (
 	// FixLengths is required. Not sure why, I didnt think i was changing the packet length. But UDP breaks if you don't.
-	options   gopacket.SerializeOptions = gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
+	Options   gopacket.SerializeOptions = gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 	rawBytes                            = []byte{0, 1, 2, 3, 4}
 	ip1test                             = net.IPv4(5, 6, 7, 8)
 	ip2test                             = net.IPv4(8, 1, 1, 1)
@@ -75,7 +75,7 @@ func CreatePacketIPTCP(t require.TestingT, src, dst net.IP, srcport, dstport uin
 	tcpLayer.SetNetworkLayerForChecksum(ipLayer)
 	// And create the packet with the layers
 	buffer := gopacket.NewSerializeBuffer()
-	err := gopacket.SerializeLayers(buffer, options,
+	err := gopacket.SerializeLayers(buffer, Options,
 		ethernetLayer,
 		ipLayer,
 		tcpLayer,
@@ -106,7 +106,7 @@ func CreateICMPPacket(srcmac, dstmac net.HardwareAddr, src, dst net.IP, icmpType
 	}
 	icmpLayer := &layers.ICMPv4{TypeCode: layers.CreateICMPv4TypeCode(icmpType, icmpCode)}
 	buffer := gopacket.NewSerializeBuffer()
-	err := gopacket.SerializeLayers(buffer, options,
+	err := gopacket.SerializeLayers(buffer, Options,
 		ethernetLayer,
 		ipLayer,
 		icmpLayer,
@@ -129,7 +129,7 @@ func CreateICMPPacketTest(t require.TestingT, src, dst net.IP, icmpType, icmpCod
 
 func ConvertPacket(pkt gopacket.Packet) []byte {
 	buf := gopacket.NewSerializeBuffer()
-	err := gopacket.SerializePacket(buf, options, pkt)
+	err := gopacket.SerializePacket(buf, Options, pkt)
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to serialise packet? this shouldnt happen %s", pkt)
 	}

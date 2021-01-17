@@ -20,11 +20,16 @@ type StaticDHCPEntry struct {
 	IP  string `yaml:"ip"`
 	MAC string `yaml:"mac"`
 }
+type DHCPConfig struct {
+	Enabled bool   `yaml:"enabled"`
+	Start   string `yaml:"start"`
+	Count   int    `yaml:"count"`
+}
 
 type LanInterface struct {
 	Name              string            `yaml:"name"`
 	Addr              string            `yaml:"addr"`
-	DHCPEnabled       bool              `yaml:"dhcp"`
+	DHCPOptions       DHCPConfig        `yaml:"dhcp"`
 	StaticDHCPEntries []StaticDHCPEntry `yaml:"staticDhcpEntries"`
 }
 
@@ -153,9 +158,9 @@ func getInterfaces(lan LanInterface) (source nat.Source, set nat.Interface) {
 		IPv4Netmask: lanAddr.Mask,
 		IPv4Network: *lanAddr,
 		NatEnabled:  true,
-		DHCPEnabled: lan.DHCPEnabled,
+		DHCPEnabled: lan.DHCPOptions.Enabled,
 		Callback:    spitter1,
-		DHCPHandler: dhcp.NewDHCPHandler(lanIP, *lanAddr, 100),
+		DHCPHandler: dhcp.NewDHCPHandler(lanIP, net.ParseIP(lan.DHCPOptions.Start), *lanAddr, lan.DHCPOptions.Count),
 	}
 
 	for _, dhcpentry := range lan.StaticDHCPEntries {

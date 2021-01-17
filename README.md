@@ -16,7 +16,7 @@ This could potentially work as a simple home NAT, if you have a seperate modem.
   * Mostly RFC compliant (details below)
   * Supports IPv4 only.
   * FTP not supported.
-  * Fragmentation not supported.
+  * Fragmentation supported, but only on the input (does not fragment out currently).
     
 ## Development enviroment setup
   
@@ -96,9 +96,9 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
 #### Possible Next features
   
   * DNS
+  * DHCP client on WAN client
   * Upnp
   * port knocking
-  * Timeout ARP entries
   
 # RFC compliance
   
@@ -117,15 +117,15 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
   * REQ-11: Done
   * REQ-12: Done
   * REQ-13: Done
-  * REQ-14: TODO - IP Fragementation. 
+  * REQ-14: Done
   
 ## rfc5382. Some of these are not included, as they are identical to those in rfc4787.
   * REQ-2 : Done
   * REQ-3 : Done
   * REQ-4 : Done 
   * REQ-5 : Done
-  * REQ-6 : Done, except for FTP.
-  * REQ-9 : TODO: SHOULD translate Unreachable (Type 3) messages.
+  * REQ-6 : Done. No FTP.
+  * REQ-9 : Done
   * REQ-10: Done
   
 ## rfc5508. Some of these are not included, as they are identical to those in rfc4787/rfc5382
@@ -138,7 +138,8 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
   * REQ-7    : TODO - Hairpin ICMP, and ICMP error packet contents
   * REQ-8    : N/a
   * REQ-9    : Done.
-  * REQ-10a1 : Fragmentation, todo (maybe)
-  * REQ-10a2 : Done
-  * REQ-10b/d: TODO, lots of ICMP messages
+  * REQ-10a1 : Done
+  * REQ-10a2 : Done. *may*. Todo, look at adding some of these
+  * REQ-10b/d: Done. *recommended*, Todo, look at adding some of these
   * REQ-11   : Done
+  

@@ -17,8 +17,7 @@ var (
 )
 
 // Example using DHCP with a single network interface device
-func NewDHCPHandler(serverIP net.IP, serverNet net.IPNet, leaseCount int) *DHCPHandler {
-	start := dhcp.IPAdd(serverIP, 1)
+func NewDHCPHandler(serverIP, start net.IP, serverNet net.IPNet, leaseCount int) *DHCPHandler {
 	return &DHCPHandler{
 		ip:            serverIP,
 		leaseDuration: 2 * time.Hour,
@@ -138,7 +137,7 @@ func (h *DHCPHandler) ServeDHCP(p dhcp.Packet, msgType dhcp.MessageType, options
 func (h *DHCPHandler) freeLease() int {
 	now := time.Now()
 	b := rand.Intn(h.leaseRange) // Try random first
-	for _, v := range [][]int{[]int{b, h.leaseRange}, []int{0, b}} {
+	for _, v := range [][]int{{b, h.leaseRange}, {0, b}} {
 		for i := v[0]; i < v[1]; i++ {
 			if l, ok := h.leases[i]; !ok || l.expiry.Before(now) {
 				return i

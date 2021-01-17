@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/gopacket"
+	"github.com/google/gopacket/ip4defrag"
 	"github.com/google/gopacket/layers"
 
 	"github.com/rs/zerolog/log"
@@ -40,6 +41,7 @@ type Nat struct {
 	internalRoutes      []net.IPNet
 	defaultGateway      Interface
 	arpNotify           ARPNotify
+	ip4defrager         *ip4defrag.IPv4Defragmenter
 	nextSrcPort         uint16
 	srcPortLock         sync.Mutex
 	portForwardingTable map[PortForwardingKey]PortForwardingEntry
@@ -50,6 +52,7 @@ func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat
 	randInt := rand.Intn(srcPortMax-srcPortMin) + srcPortMin
 	n = &Nat{
 		defaultGateway:      defaultGateway,
+		ip4defrager:         ip4defrag.NewIPv4Defragmenter(),
 		interfaces:          make(map[string]Interface),
 		internalRoutes:      make([]net.IPNet, len(lans)),
 		table:               Nattable{table: make(map[NatKey]*NatEntry), lock: sync.RWMutex{}},
@@ -141,7 +144,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 
 		if ipv4.TTL == 0 {
 			log.Debug().Msgf("Dropping packet with TTL 0, sending Time Exceeded back")
-			if err := sendICMPPacketReverse(ipv4, eth, &fromInterface, layers.ICMPv4CodeTTLExceeded); err != nil {
+			if err := sendICMPPacketReverse(ipv4, eth, &fromInterface, layers.ICMPv4TypeTimeExceeded, layers.ICMPv4CodeTTLExceeded); err != nil {
 				log.Error().Err(err).Msgf("failed to send packet %s", err)
 			}
 			return
@@ -150,7 +153,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 			// rfc4787 - REQ-13
 			lenPkt := len(pkt.Data())
 			if lenPkt > n.defaultGateway.MTU {
-				if err := sendICMPPacketReverse(ipv4, eth, &fromInterface, layers.ICMPv4CodeFragmentationNeeded); err != nil {
+				if err := sendICMPPacketReverse(ipv4, eth, &fromInterface, layers.ICMPv4TypeDestinationUnreachable, layers.ICMPv4CodeFragmentationNeeded); err != nil {
 					log.Error().Err(err).Msgf("failed to send packet %s", err)
 				}
 				return
@@ -158,8 +161,31 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		}
 
 		if ipv4.Flags&layers.IPv4MoreFragments == layers.IPv4MoreFragments || ipv4.FragOffset > 0 {
-			log.Warn().Msgf("Dropping pkt with frag offset not zero")
-			return
+			log.Info().Msgf("Got a fragmented IP packet, attempting to defrag it")
+			ipv4Out, err := n.ip4defrager.DefragIPv4(ipv4)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to defrag the pkt %s", err)
+				return
+			} else if ipv4Out == nil {
+				return
+			}
+			buffer := gopacket.NewSerializeBuffer()
+			err = gopacket.SerializeLayers(buffer, common.Options,
+				eth,
+				ipv4Out,
+				gopacket.Payload(ipv4Out.Payload),
+			)
+			if err != nil {
+				log.Error().Err(err).Msgf("failed to serialize the defragmented packet %s", err)
+				return
+			}
+
+			pktNew := gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
+
+			log.Info().Msgf("Successfully defragged the pkt, congrats! New length is - %v", pktNew)
+			pkt = pktNew
+			ipv4, _ = pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+			ipsrc, ipdst = common.GetIP(pkt.NetworkLayer())
 		}
 
 		// Check if its icmp, and its addressed to ourself
@@ -175,16 +201,22 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 				} else if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoReply {
 					log.Debug().Msgf("Got an ICMP response to %s:%s. Going to pass through to NAT, as its probably a clients packet - %s", ipsrc, ipdst, icmp.TypeCode)
 
-				} else {
-					log.Warn().Msgf("ICMP message sent to me, but not a request? ,Code=%s", icmp.TypeCode)
+				} else if icmp.TypeCode.Type() == layers.ICMPv4TypeTimeExceeded || icmp.TypeCode.Type() == layers.ICMPv4TypeDestinationUnreachable {
+					err := n.handleDestUnreachable(eth, ipv4, icmp, pkt, &fromInterface)
+					if err != nil {
+						log.Error().Err(err).Msgf("failed to handle ICMP Destination unreachable %s", err)
+					}
 					return
+
 				}
 			} else {
 				log.Debug().Msgf("Got an ICMP response to %s:%s. Code=%s", ipsrc, ipdst, icmp.TypeCode)
 			}
 		}
 
-		// Check if its from and to a LAN interface
+		// Check if its from AND to a LAN interface
+		// Im assuming its faster to just loop over internalRoutes, instead of implementing a ipnetwork tree object, as
+		// most of the time there will only be one LAN network, at most a few.
 		if fromInterface.NatEnabled {
 			for _, route := range n.internalRoutes {
 				if route.Contains(ipdst) {
@@ -223,6 +255,76 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		log.Info().Msgf("Some other pkt type - %d. Currently unsupported - %s", eth.EthernetType, pkt)
 	}
 }
+
+// handleDestUnreachable - Handles an ICMP Destination Unreachable packet.
+// We need to un-nat the IP level, then parse the ICMP payload, and un-nat that.
+// Then, we need to recreate a new ICMP packet (only way i can get editing the payload in gopacket working), and forward on - if its in our NAT table
+// This function is a bit cumbersom and difficult to follow, and has only been tested in a small capacity,
+func (n *Nat) handleDestUnreachable(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *layers.ICMPv4, pkt gopacket.Packet, fromInterface *Interface) (err error) {
+
+	payload := icmp.Payload
+	outpkt := gopacket.NewPacket(payload, layers.LayerTypeIPv4, gopacket.Default)
+	log.Debug().Msgf("=====================================Input pkts ------ =====================================\n%v\n%v", pkt, outpkt)
+
+	if outpkt == nil {
+		return ErrICMPFailure
+	}
+	newip, _ := outpkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	if newip == nil {
+		return ErrICMPFailure
+	}
+
+	var srcport, dstport uint16
+	udp, _ := outpkt.Layer(layers.LayerTypeUDP).(*layers.UDP)
+	if udp != nil {
+		srcport = uint16(udp.SrcPort)
+		dstport = uint16(udp.DstPort)
+		udp.SetNetworkLayerForChecksum(ipv4)
+	}
+	tcp, _ := outpkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
+	if tcp != nil {
+		srcport = uint16(tcp.SrcPort)
+		dstport = uint16(tcp.DstPort)
+		tcp.SetNetworkLayerForChecksum(ipv4)
+
+	}
+	icmpNew, _ := outpkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+
+	natkey := NatKey{SrcPort: dstport, DstPort: srcport, SrcIP: newip.DstIP.String(), DstIP: newip.SrcIP.String(), Protocol: newip.Protocol}
+	forwardEntry := n.table.Get(natkey)
+	if forwardEntry == nil {
+		log.Warn().Msgf("Recieved a ICMP unreachable message, but no entry in the nat table, possibly a bug. %s", natkey)
+		return nil
+	}
+	ipv4.DstIP = forwardEntry.DstIP
+	// ipv4.SrcIP = forwardEntry.SrcIP
+	toInterface := forwardEntry.Inf
+	eth.DstMAC = forwardEntry.DstMac
+	eth.SrcMAC = toInterface.IfHWAddr
+	newip.SrcIP = ipv4.DstIP
+	ipv4.TTL -= 1
+	buffer := gopacket.NewSerializeBuffer()
+	if tcp != nil {
+		tcp.SrcPort = layers.TCPPort(forwardEntry.DstPort)
+
+	} else if udp != nil {
+		udp.SrcPort = layers.UDPPort(forwardEntry.DstPort)
+
+	} else if icmpNew != nil {
+		log.Warn().Msgf("GOT AN ICMP RETURN????")
+	}
+	err = gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}, eth, ipv4, icmp, gopacket.Payload(common.ConvertPacket(outpkt)))
+
+	if err != nil {
+		log.Error().Err(err).Msgf("failed to serialize packet %s", err)
+		return
+	}
+
+	log.Debug().Msgf("=====================================output pkts for %s ------ =====================================\n%v\n%v", natkey, pkt, outpkt)
+	toInterface.Callback.SendBytes(buffer.Bytes())
+	return
+}
+
 func (n *Nat) routeInternally(ipv4 *layers.IPv4, eth *layers.Ethernet, pkt gopacket.Packet) (err error) {
 	arpEntry, err := n.getEthAddr(ipv4.DstIP)
 	if err != nil {
@@ -241,8 +343,8 @@ func (n *Nat) routeInternally(ipv4 *layers.IPv4, eth *layers.Ethernet, pkt gopac
 
 }
 
-func sendICMPPacketReverse(ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterface *Interface, code uint8) error {
-	buf, err := common.CreateICMPPacket(eth.DstMAC, eth.SrcMAC, ipv4.DstIP, ipv4.SrcIP, code, 0)
+func sendICMPPacketReverse(ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterface *Interface, icmpType, icmpCode uint8) error {
+	buf, err := common.CreateICMPPacket(eth.DstMAC, eth.SrcMAC, ipv4.DstIP, ipv4.SrcIP, icmpType, icmpCode)
 	if err != nil {
 		return err
 	}

@@ -71,7 +71,7 @@ func (s Spitter) Send(pkt gopacket.Packet) (err error) {
 	// log.Debug().Msgf("Writting pkt to interface %s. of len %d\n-----%s", s.ifName, len(pkt.Data()), hex.EncodeToString(pkt.Data()))
 	err = s.handle.WritePacketData(buf)
 	if err != nil {
-		log.Error().Err(err).Msgf("Ouch. This is probably just a too large packet - probably TSO related. Dropping seems to work.")
+		log.Error().Err(err).Msgf("Ouch. This is probably just a too large packet - probably TSO related.")
 	}
 
 	return
@@ -80,7 +80,7 @@ func (s Spitter) Send(pkt gopacket.Packet) (err error) {
 func (s Spitter) SendBytes(buf []byte) (err error) {
 	err = s.handle.WritePacketData(buf)
 	if err != nil {
-		log.Error().Err(err).Msgf("Ouch. This is probably just a too large packet - probably TSO related. Dropping seems to work.")
+		log.Error().Err(err).Msgf("Ouch. This is probably just a too large packet - probably TSO related.")
 	}
 	return
 }

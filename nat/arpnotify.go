@@ -19,8 +19,9 @@ import (
 // The main thing to note is that we're using a single thread to handle all of the ARP responses.
 
 type ArpEntry struct {
-	Mac     net.HardwareAddr
-	IntName string
+	Mac       net.HardwareAddr
+	IntName   string
+	TimeAdded time.Time
 }
 
 var EmptyArpEntry = ArpEntry{}
@@ -34,7 +35,7 @@ type ARPNotify struct {
 }
 
 func (a *ARPNotify) AddArpEntry(ip net.IP, mac net.HardwareAddr, interfaceName string) {
-	a.arpTable.Store(ip.String(), ArpEntry{Mac: mac, IntName: interfaceName})
+	a.arpTable.Store(ip.String(), ArpEntry{Mac: mac, IntName: interfaceName, TimeAdded: time.Now()})
 	a.arpChan <- ip
 }
 
@@ -52,6 +53,7 @@ func (a *ARPNotify) Close() {
 func (a *ARPNotify) Init() {
 	a.arpChan = make(chan net.IP, 1024)
 	a.arpWaiters = make(map[string]chan bool)
+	// Wait for a arp entry from a listener
 	go func() {
 		for {
 			ip := <-a.arpChan
@@ -62,6 +64,19 @@ func (a *ARPNotify) Init() {
 			delete(a.arpWaiters, ip.String())
 			a.lock.Unlock()
 		}
+	}()
+	// age off the arp table
+	go func() {
+		for now := range time.Tick(time.Second * 60) {
+			shortTimeout := now.Add(-time.Minute * 10)
+			a.arpTable.Range(func(key, value interface{}) bool {
+				if shortTimeout.After(value.(ArpEntry).TimeAdded) {
+					a.arpTable.Delete(key)
+				}
+				return true
+			})
+		}
+
 	}()
 }
 
