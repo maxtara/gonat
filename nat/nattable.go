@@ -46,7 +46,7 @@ type NatKey struct {
 }
 type NatEntry struct {
 	LastSeen         time.Time
-	SrcPort, DstPort uint16
+	SrcPort, DstPort uint16 // SrcPort is also used for icmp.Iq
 	SrcIP, DstIP     net.IP
 	Inf              *Interface
 	DstMac           net.HardwareAddr

@@ -102,6 +102,9 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
   
 # RFC compliance
   
+## rfc3022
+There are no REQ requirements in rfc3022, however broadly speaking it is followed. Except FTP.
+
 ## rfc4787
   * REQ-1 : Done
   * REQ-2 : Done
@@ -132,12 +135,12 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
   * REQ-1    : Done
   * REQ-2    : Done
   * REQ-3    : N/a. I think this is left to gopacket.
-  * REQ-4    : TODO, Mostly done via gopacket, will be done once below REQ5 is done i think.
-  * REQ-5    : TODO, un-nat layer 4 ICMP Error packet
-  * REQ-6    : Done. 
+  * REQ-4    : Done
+  * REQ-5    : Done
+  * REQ-6    : Done
   * REQ-7    : TODO - Hairpin ICMP, and ICMP error packet contents
   * REQ-8    : N/a
-  * REQ-9    : Done.
+  * REQ-9    : Done
   * REQ-10a1 : Done
   * REQ-10a2 : Done. *may*. Todo, look at adding some of these
   * REQ-10b/d: Done. *recommended*, Todo, look at adding some of these

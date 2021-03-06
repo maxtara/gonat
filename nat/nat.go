@@ -201,10 +201,11 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 				} else if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoReply {
 					log.Debug().Msgf("Got an ICMP response to %s:%s. Going to pass through to NAT, as its probably a clients packet - %s", ipsrc, ipdst, icmp.TypeCode)
 
-				} else if icmp.TypeCode.Type() == layers.ICMPv4TypeTimeExceeded || icmp.TypeCode.Type() == layers.ICMPv4TypeDestinationUnreachable {
-					err := n.handleDestUnreachable(eth, ipv4, icmp, pkt, &fromInterface)
+				} else {
+					// Currently tested on ICMPv4TypeTimeExceeded and ICMPv4TypeDestinationUnreachable.
+					err := n.handleOtherICMP(eth, ipv4, icmp, pkt, &fromInterface)
 					if err != nil {
-						log.Error().Err(err).Msgf("failed to handle ICMP Destination unreachable %s", err)
+						log.Error().Err(err).Msgf("failed to handle other ICMP message %s", err)
 					}
 					return
 
@@ -256,11 +257,12 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 	}
 }
 
-// handleDestUnreachable - Handles an ICMP Destination Unreachable packet.
-// We need to un-nat the IP level, then parse the ICMP payload, and un-nat that.
+// handleOtherICMP - Handles an ICMP message. Mostly REQ-4 on rfc5508
+// Parse the ICMP payload (if there is one there).Then, check if it relates to an entry in our NAT table.
+// We need to un-nat the IP level, and un-nat the TCP/UDP level if there is one.
 // Then, we need to recreate a new ICMP packet (only way i can get editing the payload in gopacket working), and forward on - if its in our NAT table
 // This function is a bit cumbersom and difficult to follow, and has only been tested in a small capacity,
-func (n *Nat) handleDestUnreachable(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *layers.ICMPv4, pkt gopacket.Packet, fromInterface *Interface) (err error) {
+func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *layers.ICMPv4, pkt gopacket.Packet, fromInterface *Interface) (err error) {
 
 	payload := icmp.Payload
 	outpkt := gopacket.NewPacket(payload, layers.LayerTypeIPv4, gopacket.Default)
@@ -289,6 +291,9 @@ func (n *Nat) handleDestUnreachable(eth *layers.Ethernet, ipv4 *layers.IPv4, icm
 
 	}
 	icmpNew, _ := outpkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+	if icmpNew != nil {
+		srcport = uint16(icmpNew.Seq)
+	}
 
 	natkey := NatKey{SrcPort: dstport, DstPort: srcport, SrcIP: newip.DstIP.String(), DstIP: newip.SrcIP.String(), Protocol: newip.Protocol}
 	forwardEntry := n.table.Get(natkey)
@@ -310,8 +315,6 @@ func (n *Nat) handleDestUnreachable(eth *layers.Ethernet, ipv4 *layers.IPv4, icm
 	} else if udp != nil {
 		udp.SrcPort = layers.UDPPort(forwardEntry.DstPort)
 
-	} else if icmpNew != nil {
-		log.Warn().Msgf("GOT AN ICMP RETURN????")
 	}
 	err = gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}, eth, ipv4, icmp, gopacket.Payload(common.ConvertPacket(outpkt)))
 
@@ -424,6 +427,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 	var srcport, dstport uint16
 	var tcp *layers.TCP
 	var udp *layers.UDP
+	var icmp *layers.ICMPv4
 	var toInterface *Interface
 	originalSourceIP := ipv4.SrcIP
 	protocol := ipv4.Protocol
@@ -432,20 +436,19 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 
 	if protocol == layers.IPProtocolTCP {
 		// Get actual TCP data from this layer
-		tcpLayer := pkt.Layer(layers.LayerTypeTCP)
-		tcp, _ = tcpLayer.(*layers.TCP)
+		tcp, _ = pkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
 		srcport = uint16(tcp.SrcPort)
 		dstport = uint16(tcp.DstPort)
 		tcp.SetNetworkLayerForChecksum(ipv4)
 	} else if protocol == layers.IPProtocolUDP {
 		// Get actual UDP data from this layer
-		udpLayer := pkt.Layer(layers.LayerTypeUDP)
-		udp, _ = udpLayer.(*layers.UDP)
+		udp, _ = pkt.Layer(layers.LayerTypeUDP).(*layers.UDP)
 		srcport = uint16(udp.SrcPort)
 		dstport = uint16(udp.DstPort)
 		udp.SetNetworkLayerForChecksum(ipv4)
 	} else if protocol == layers.IPProtocolICMPv4 {
-		log.Debug().Msgf("ICMP packet entering NAT.")
+		icmp, _ = pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
+		srcport = uint16(icmp.Seq)
 	} else if ipv4.Protocol == layers.IPProtocolIGMP {
 		log.Debug().Msgf("Trying to NAT IGMP. Going to pass this through, TODO - investigate")
 	} else {
@@ -471,8 +474,9 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		} else if udp != nil {
 			udp.SrcPort = layers.UDPPort(forwardEntry.SrcPort)
 			udp.DstPort = layers.UDPPort(forwardEntry.DstPort)
+		} else if icmp != nil {
+			icmp.Seq = uint16(forwardEntry.SrcPort)
 		}
-
 	} else {
 		// Not natted previously - find a new NAT if
 		// 1. we're on a NAT enabled port
@@ -484,11 +488,6 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 			log.Warn().Msgf("Recieved DNS packet addressed to me on %s. Not currently supported.", fromInterface.IfName)
 		}
 
-		// // If its TCP, only NAT when SYN is set
-		// if tcp != nil && !tcp.SYN {
-		// 	log.Error().Msgf("Will not initiate a NAT when the TCP SYN flag is not set %s", pkt)
-		// 	return
-		// }
 		originalSrcPort := srcport
 		originalDstPort := dstport
 		originalDstIp := ipv4.DstIP
@@ -553,6 +552,8 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 			tcp.SrcPort = layers.TCPPort(srcport)
 		} else if udp != nil {
 			udp.SrcPort = layers.UDPPort(srcport)
+		} else if icmp != nil {
+			icmp.Seq = uint16(srcport)
 		}
 		// Create new forward entries. hold a reference to a key of the reverse direction.
 		forwardEntry = &NatEntry{SrcPort: srcport, SrcIP: ipv4.SrcIP, Inf: toInterface, DstPort: dstport, DstIP: ipv4.DstIP, DstMac: eth.DstMAC, ReverseKey: reverseKey}
