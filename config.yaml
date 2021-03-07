@@ -28,4 +28,10 @@ portForwardingRules:
     externalPortEnd: 44
     protocol: tcp
     internalIP: 172.15.2.10
+  - name: rejectme
+    internalPortStart: 1234 # end is implied
+    externalPortStart: 1234
+    externalPortEnd: 1234
+    protocol: udp
+    internalIP: 172.15.2.10
 

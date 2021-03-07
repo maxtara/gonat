@@ -212,6 +212,11 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 				}
 			} else {
 				log.Debug().Msgf("Got an ICMP response to %s:%s. Code=%s", ipsrc, ipdst, icmp.TypeCode)
+				err := n.handleOtherICMP(eth, ipv4, icmp, pkt, &fromInterface)
+				if err != nil {
+					log.Error().Err(err).Msgf("failed to handle other ICMP message %s", err)
+				}
+
 			}
 		}
 
@@ -266,7 +271,7 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 
 	payload := icmp.Payload
 	outpkt := gopacket.NewPacket(payload, layers.LayerTypeIPv4, gopacket.Default)
-	log.Debug().Msgf("=====================================Input pkts ------ =====================================\n%v\n%v", pkt, outpkt)
+	log.Info().Msgf("=====================================Input pkts ------ =====================================\n%v\n%v", pkt, outpkt)
 
 	if outpkt == nil {
 		return ErrICMPFailure
@@ -301,12 +306,16 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 		log.Warn().Msgf("Recieved a ICMP unreachable message, but no entry in the nat table, possibly a bug. %s", natkey)
 		return nil
 	}
-	ipv4.DstIP = forwardEntry.DstIP
-	// ipv4.SrcIP = forwardEntry.SrcIP
+
 	toInterface := forwardEntry.Inf
 	eth.DstMAC = forwardEntry.DstMac
 	eth.SrcMAC = toInterface.IfHWAddr
-	newip.SrcIP = ipv4.DstIP
+	// Set embeded IP layer to the reverse of the expected packet
+	newip.SrcIP = forwardEntry.DstIP
+	newip.DstIP = forwardEntry.SrcIP
+	// rfc5508 - REQ-7. This gets both Traceroutes and hairpinned ICMP errors working
+	ipv4.DstIP = newip.SrcIP
+
 	ipv4.TTL -= 1
 	buffer := gopacket.NewSerializeBuffer()
 	if tcp != nil {
@@ -323,7 +332,7 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 		return
 	}
 
-	log.Debug().Msgf("=====================================output pkts for %s ------ =====================================\n%v\n%v", natkey, pkt, outpkt)
+	log.Info().Msgf("=====================================output pkts for %s ------ =====================================\n%v\n%v", natkey, pkt, outpkt)
 	toInterface.Callback.SendBytes(buffer.Bytes())
 	return
 }
@@ -591,7 +600,9 @@ func (n *Nat) chooseSrcPort(p1, selectPort uint16, i1, i2 *net.IP, prot *layers.
 	n.table.lock.Lock()
 
 	_, ok := n.table.table[*tryKey]
-	if !ok { // Entry not in table, safe to create then retunr
+	// Entry not in table, safe to create then return
+	// I think its safe to re-use the same id for ICMP - i think this happens in some cases (DestUnreach).
+	if !ok || *prot == layers.IPProtocolICMPv4 {
 		n.table.table[*tryKey] = entry
 		n.table.lock.Unlock()
 		log.Debug().Msgf("New NAT (reverse) for %s - %s", entry.Inf.IfName, tryKey)
@@ -610,6 +621,7 @@ func (n *Nat) chooseSrcPort(p1, selectPort uint16, i1, i2 *net.IP, prot *layers.
 
 	if recursionCount > 10 {
 		log.Warn().Msgf("Recursive limit exceeded, definately a big issue.")
+		return nil
 	}
 
 	n.table.lock.Unlock()

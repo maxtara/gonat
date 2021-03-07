@@ -138,7 +138,7 @@ There are no REQ requirements in rfc3022, however broadly speaking it is followe
   * REQ-4    : Done
   * REQ-5    : Done
   * REQ-6    : Done
-  * REQ-7    : TODO - Hairpin ICMP, and ICMP error packet contents
+  * REQ-7    : Done
   * REQ-8    : N/a
   * REQ-9    : Done
   * REQ-10a1 : Done
