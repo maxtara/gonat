@@ -37,6 +37,6 @@ type Source interface {
 
 // Dest - a Destination of packets. Interface to make it easier to test with.
 type Dest interface {
-	Send(gopacket.Packet) (err error)
+	Send(gopacket.Packet, int) (err error)
 	SendBytes([]byte) (err error)
 }

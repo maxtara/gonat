@@ -129,21 +129,16 @@ func CreateICMPPacketTest(t require.TestingT, src, dst net.IP, icmpType, icmpCod
 
 func ConvertPacket(pkt gopacket.Packet) []byte {
 	buf := gopacket.NewSerializeBuffer()
-	err := gopacket.SerializePacket(buf, Options, pkt)
-	if err != nil {
-		log.Error().Err(err).Msgf("Failed to serialise packet? this shouldnt happen %s", pkt)
-	}
-
-	return buf.Bytes()
+	return ConvertPacketRuse(pkt, &buf)
 }
 
-func ConvertPacketRuse(pkt gopacket.Packet, buf gopacket.SerializeBuffer) []byte {
-	err := gopacket.SerializePacket(buf, Options, pkt)
+func ConvertPacketRuse(pkt gopacket.Packet, buf *gopacket.SerializeBuffer) []byte {
+	err := gopacket.SerializePacket(*buf, Options, pkt)
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to serialise packet? this shouldnt happen %s", pkt)
 	}
 
-	return buf.Bytes()
+	return (*buf).Bytes()
 }
 
 func GetIP(flow gopacket.NetworkLayer) (net.IP, net.IP) {

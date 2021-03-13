@@ -95,6 +95,9 @@ func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat
 // AcceptPkt decides what to do with a packet. I'm assuming all the packet layers are correct, so don't use the lazy option of gopacket
 // I _think_ this is safe, and gopacket will throw an error before even getting here, TODO - test
 func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
+	n.AcceptPktThreaded(pkt, ifName, 0)
+}
+func (n *Nat) AcceptPktThreaded(pkt gopacket.Packet, ifName string, threadCount int) {
 
 	eth := pkt.LinkLayer().(*layers.Ethernet)
 	// From ipset
@@ -195,7 +198,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 			if ipdst.Equal(fromInterface.IPv4Addr) {
 				// Make sure its a request to
 				if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoRequest {
-					if err := sendICMPEchoResponse(ipv4, icmp, eth, pkt, &fromInterface); err != nil {
+					if err := sendICMPEchoResponse(ipv4, icmp, eth, pkt, &fromInterface, threadCount); err != nil {
 						log.Error().Err(err).Msgf("failed to send packet %s", err)
 					}
 					return // Sent packet or error'd. Dont NAT, return.
@@ -228,14 +231,14 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 			for _, route := range n.internalRoutes {
 				if route.Contains(ipdst) && !fromInterface.IPv4Addr.Equal(ipdst) {
 					log.Debug().Msgf("Packet to %s:%s is internal. Sending straight out the right interface", ipsrc, ipdst)
-					n.routeInternally(ipv4, eth, pkt)
+					n.routeInternally(ipv4, eth, pkt, threadCount)
 					return
 				}
 			}
 		}
 
 		// Probably a NAT'able packet from here on
-		if err := n.natPacket(pkt, ipv4, eth, &fromInterface); err != nil {
+		if err := n.natPacket(pkt, ipv4, eth, &fromInterface, threadCount); err != nil {
 			log.Error().Err(err).Msgf("failed to NAT packet %s", pkt)
 		}
 		return
@@ -247,7 +250,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		log.Debug().Msgf("Arg message receieved-  %+v", arp)
 
 		if fromInterface.IPv4Addr.Equal(arp.DstProtAddress) && arp.Operation == 1 { // 1 is ARPRequest
-			if err := sendARPResponse(arp, eth, pkt, &fromInterface); err != nil {
+			if err := sendARPResponse(arp, eth, pkt, &fromInterface, threadCount); err != nil {
 				log.Error().Err(err).Msgf("failed to send packet %s", err)
 			}
 			return // Sent packet or error'd. Dont NAT, return.
@@ -338,8 +341,8 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 	return
 }
 
-func (n *Nat) routeInternally(ipv4 *layers.IPv4, eth *layers.Ethernet, pkt gopacket.Packet) (err error) {
-	arpEntry, err := n.getEthAddr(ipv4.DstIP)
+func (n *Nat) routeInternally(ipv4 *layers.IPv4, eth *layers.Ethernet, pkt gopacket.Packet, threadCount int) (err error) {
+	arpEntry, err := n.getEthAddr(ipv4.DstIP, threadCount)
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to get eth addr for %s", ipv4.DstIP)
 		return
@@ -352,7 +355,7 @@ func (n *Nat) routeInternally(ipv4 *layers.IPv4, eth *layers.Ethernet, pkt gopac
 	}
 	eth.SrcMAC = toInterface.IfHWAddr
 
-	return toInterface.Callback.Send(pkt)
+	return toInterface.Callback.Send(pkt, threadCount)
 
 }
 
@@ -364,7 +367,7 @@ func sendICMPPacketReverse(ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterfac
 	return fromInterface.Callback.SendBytes(buf)
 }
 
-func sendICMPEchoResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface *Interface) (err error) {
+func sendICMPEchoResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface *Interface, threadCount int) (err error) {
 	// Flip the packet around, and send it pack. Shortcut to generating an ICMP packet.
 	oldEth := ipv4.DstIP
 	ipv4.DstIP = ipv4.SrcIP
@@ -378,7 +381,7 @@ func sendICMPEchoResponse(ipv4 *layers.IPv4, icmp *layers.ICMPv4, eth *layers.Et
 	eth.DstMAC = eth.SrcMAC
 	eth.SrcMAC = oldIP
 
-	return fromInterface.Callback.Send(pkt)
+	return fromInterface.Callback.Send(pkt, threadCount)
 
 }
 
@@ -406,7 +409,7 @@ func sendDHCPResponse(eth *layers.Ethernet, ipv4 *layers.IPv4, udp *layers.UDP, 
 	return fromInterface.Callback.SendBytes(buffer.Bytes())
 }
 
-func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface *Interface) (err error) {
+func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt gopacket.Packet, fromInterface *Interface, threadCount int) (err error) {
 	// Generate ARP response
 	arp.Operation = layers.ARPReply
 	// Swap the protocol addresses
@@ -427,13 +430,13 @@ func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt gopacket.Packet,
 		bytes.Equal(fromInterface.IfHWAddr, zeroHWAddr) {
 		log.Fatal().Msgf("ARP Response has invalid data. %v", pkt)
 	} else {
-		err = fromInterface.Callback.Send(pkt)
+		err = fromInterface.Callback.Send(pkt, threadCount)
 	}
 	return
 }
 
 // natPacket - I'm going to blindly trust that the layer4 protocol will decode. Trusting that gopacket when lazy=false
-func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterface *Interface) (err error) {
+func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterface *Interface, threadCount int) (err error) {
 	var srcport, dstport uint16
 	var tcp *layers.TCP
 	var udp *layers.UDP
@@ -521,7 +524,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 			}
 			log.Info().Msgf("New packet matches port forwarding rule: %+v  ---- %+v", pfkey, entry)
 			ipv4.DstIP = entry.InternalIP
-			tmp, errTmp := n.getEthAddr(entry.InternalIP)
+			tmp, errTmp := n.getEthAddr(entry.InternalIP, threadCount)
 			if errTmp != nil {
 				log.Error().Err(err).Msgf("Failed to get MAC address for %s", entry.InternalIP)
 				return
@@ -542,7 +545,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 			ipv4.SrcIP = n.defaultGateway.IPv4Addr
 			toInterface = &n.defaultGateway
 			expectedDstIP = toInterface.IPv4Addr
-			tmp, errTmp := n.getEthAddr(toInterface.IPv4Gateway)
+			tmp, errTmp := n.getEthAddr(toInterface.IPv4Gateway, threadCount)
 			if errTmp != nil {
 				log.Error().Err(err).Msgf("Failed to get MAC address for %s", toInterface.IPv4Gateway)
 				return
@@ -578,7 +581,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 	log.Debug().Msgf("Spitted on %s packet =  (%v)", toInterface.IfName, pkt)
 
 	// Send packet
-	err = toInterface.Callback.Send(pkt)
+	err = toInterface.Callback.Send(pkt, threadCount)
 	if err != nil {
 		return
 	}
@@ -720,7 +723,7 @@ func (n *Nat) trackTCP(forwardEntry *NatEntry, tcp *layers.TCP) {
 // 1. Check the ARP table
 // 2. If not found, send ARP request on all interfaces that contains the ip
 // 3. Then wait for ARP reply
-func (n *Nat) getEthAddr(ip net.IP) (ArpEntry, error) {
+func (n *Nat) getEthAddr(ip net.IP, threadCount int) (ArpEntry, error) {
 
 	mac, ok := n.arpNotify.GetArpEntry(ip)
 	if !ok {
@@ -729,7 +732,7 @@ func (n *Nat) getEthAddr(ip net.IP) (ArpEntry, error) {
 		for _, intVal := range n.interfaces {
 			// log.Debug().Msgf("Checking %+v for %s. Waiting", intVal, ip)
 			if intVal.IPv4Network.Contains(ip) {
-				if err := n.doArp(ip, &intVal); err != nil {
+				if err := n.doArp(ip, &intVal, threadCount); err != nil {
 					return EmptyArpEntry, err
 				}
 			}
@@ -754,7 +757,7 @@ func (n *Nat) updateArpTable(mac net.HardwareAddr, ip net.IP, interfaceName stri
 		n.arpNotify.AddArpEntry(ip, mac, interfaceName)
 	}
 }
-func (n *Nat) doArp(dst net.IP, intf *Interface) (err error) {
+func (n *Nat) doArp(dst net.IP, intf *Interface, threadCount int) (err error) {
 	log.Info().Msgf("Doing an ARP request for %s from %s", dst, intf.IfName)
 	// Send ARP request
 	eth := &layers.Ethernet{
@@ -785,7 +788,7 @@ func (n *Nat) doArp(dst net.IP, intf *Interface) (err error) {
 	}
 	pkt := gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
 	log.Debug().Msgf("======= Sending %v", pkt)
-	err = intf.Callback.Send(pkt)
+	err = intf.Callback.Send(pkt, threadCount)
 	if err != nil {
 		return
 	}

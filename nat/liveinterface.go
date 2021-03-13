@@ -194,19 +194,21 @@ func (s Sniffer) Start5(nat *Nat, bpf string) (err error) {
 	log.Info().Msgf("Started listening on %s with BPF filter %s", s.ifName, bpf)
 
 	// ------------ VERSION 5
+	var opts = gopacket.DecodeOptions{NoCopy: true, Lazy: true}
+
 	lt := handle.LinkType()
-	runAsync := func() {
+	runAsync := func(i int) {
 		for {
 			data, _, _ := handle.ReadPacketData()
-			pkt := gopacket.NewPacket(data, lt, gopacket.Default)
-			nat.AcceptPkt(pkt, s.ifName)
+			pkt := gopacket.NewPacket(data, lt, opts)
+			nat.AcceptPktThreaded(pkt, s.ifName, i)
 		}
 	}
 
 	for i := 0; i < GoRoutineCount-1; i++ {
-		go runAsync()
+		go runAsync(i)
 	}
-	runAsync()
+	runAsync(GoRoutineCount - 1)
 	return
 }
 
@@ -214,10 +216,15 @@ func (s Sniffer) Start5(nat *Nat, bpf string) (err error) {
 type Spitter struct {
 	ifName string
 	handle *pcap.Handle
+	bufs   [GoRoutineCount]gopacket.SerializeBuffer
 }
 
 func CreateSpitter(ifName string, promisc bool) Dest {
 	s := Spitter{ifName: ifName}
+	s.bufs = [GoRoutineCount]gopacket.SerializeBuffer{}
+	for i := 0; i < GoRoutineCount; i++ {
+		s.bufs[i] = gopacket.NewSerializeBuffer()
+	}
 	handle, err := pcap.OpenLive(ifName, SnapLen, promisc, pcap.BlockForever)
 	if err != nil {
 		panic(err)
@@ -226,13 +233,14 @@ func CreateSpitter(ifName string, promisc bool) Dest {
 	return s
 }
 
-func (s Spitter) Send(pkt gopacket.Packet) (err error) {
-	buf := common.ConvertPacket(pkt)
+func (s Spitter) Send(pkt gopacket.Packet, threadCount int) (err error) {
+	buf := common.ConvertPacketRuse(pkt, &s.bufs[threadCount])
 	// log.Debug().Msgf("Writting pkt to interface %s. of len %d\n-----%s", s.ifName, len(pkt.Data()), hex.EncodeToString(pkt.Data()))
 	err = s.handle.WritePacketData(buf)
 	if err != nil {
 		log.Error().Err(err).Msgf("Ouch. This is probably just a too large packet - probably TSO related.")
 	}
+	s.bufs[threadCount].Clear()
 
 	return
 }

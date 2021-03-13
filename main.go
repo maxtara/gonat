@@ -7,6 +7,8 @@ import (
 	"gonat/dhcp"
 	"gonat/nat"
 	"net"
+	"net/http"
+	_ "net/http/pprof"
 	"os"
 	"sync"
 
@@ -46,6 +48,7 @@ type Config struct {
 func main() {
 	loglvlStr := flag.String("v", "debug", "debug level")
 	configStr := flag.String("c", "config.yaml", "config location")
+	var netprofile = flag.String("netprofile", "", "Start a http service for profiling")
 	flag.Parse()
 	loglvl, err := zerolog.ParseLevel(*loglvlStr)
 	if err != nil {
@@ -53,17 +56,16 @@ func main() {
 	}
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(loglvl).With().Timestamp().Logger().With().Caller().Logger()
 
-	// ff, errv := os.Create("cpuprofile")
-	// if errv != nil {
-	// 	log.Fatal().Err(errv).Msg("Failed to create CPU profile")
-	// }
-	// pprof.StartCPUProfile(ff)
-	// go func() {
-	// 	time.Sleep(10 * time.Second)
-	// 	pprof.StopCPUProfile()
-	// 	log.Warn().Msg("\n\n\n\n\n###########################################CPU PROFILE FINISHED")
-	// }()
-
+	if *netprofile != "" {
+		go func() {
+			log.Warn().Msg("")
+			log.Warn().Msgf("HTTP profiling server started at addr %s.\nwget -O trace.out http://localhost:6060/debug/pprof/profile?seconds=10 && go tool pprof -http=0.0.0.0:8080 gonat trace.out ", *netprofile)
+			err := http.ListenAndServe(*netprofile, nil)
+			if err != nil {
+				log.Fatal().Err(err).Msg("Failed to start HTTP profiling server")
+			}
+		}()
+	}
 	f, err := os.Open(*configStr)
 	if err != nil {
 		log.Fatal().Err(err).Msgf("Failed to open config %s", *configStr)
