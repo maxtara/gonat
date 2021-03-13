@@ -24,6 +24,7 @@ type DHCPConfig struct {
 	Enabled bool   `yaml:"enabled"`
 	Start   string `yaml:"start"`
 	Count   int    `yaml:"count"`
+	DNS     string `yaml:"dns"`
 }
 
 type LanInterface struct {
@@ -51,6 +52,18 @@ func main() {
 		panic("Failed to parse log level, try debug")
 	}
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(loglvl).With().Timestamp().Logger().With().Caller().Logger()
+
+	// ff, errv := os.Create("cpuprofile")
+	// if errv != nil {
+	// 	log.Fatal().Err(errv).Msg("Failed to create CPU profile")
+	// }
+	// pprof.StartCPUProfile(ff)
+	// go func() {
+	// 	time.Sleep(10 * time.Second)
+	// 	pprof.StopCPUProfile()
+	// 	log.Warn().Msg("\n\n\n\n\n###########################################CPU PROFILE FINISHED")
+	// }()
+
 	f, err := os.Open(*configStr)
 	if err != nil {
 		log.Fatal().Err(err).Msgf("Failed to open config %s", *configStr)
@@ -160,7 +173,7 @@ func getInterfaces(lan LanInterface) (source nat.Source, set nat.Interface) {
 		NatEnabled:  true,
 		DHCPEnabled: lan.DHCPOptions.Enabled,
 		Callback:    spitter1,
-		DHCPHandler: dhcp.NewDHCPHandler(lanIP, net.ParseIP(lan.DHCPOptions.Start), *lanAddr, lan.DHCPOptions.Count),
+		DHCPHandler: dhcp.NewDHCPHandler(lanIP, net.ParseIP(lan.DHCPOptions.Start), net.ParseIP(lan.DHCPOptions.DNS), *lanAddr, lan.DHCPOptions.Count),
 	}
 
 	for _, dhcpentry := range lan.StaticDHCPEntries {

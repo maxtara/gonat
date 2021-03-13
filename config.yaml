@@ -9,6 +9,7 @@ lan:
       enabled: true
       start: 172.15.2.2
       count: 20
+      dns: 8.8.8.8
     staticDhcpEntries:
       - ip: 172.15.2.10
         mac: 00:15:5d:13:30:21

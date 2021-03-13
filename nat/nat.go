@@ -133,7 +133,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 				}
 			}
 			// Not from our subnets or a broadcast
-			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping.\n", ifName, fromInterface.IPv4Network, ipsrc, ipdst)
+			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping", ifName, fromInterface.IPv4Network, ipsrc, ipdst)
 			return
 		}
 
@@ -153,6 +153,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 			// rfc4787 - REQ-13
 			lenPkt := len(pkt.Data())
 			if lenPkt > n.defaultGateway.MTU {
+				log.Warn().Msg("Fragmentation bit set, and too big!. Why? Could be GSO/GRO/TSO. Turn em off")
 				if err := sendICMPPacketReverse(ipv4, eth, &fromInterface, layers.ICMPv4TypeDestinationUnreachable, layers.ICMPv4CodeFragmentationNeeded); err != nil {
 					log.Error().Err(err).Msgf("failed to send packet %s", err)
 				}
@@ -225,7 +226,7 @@ func (n *Nat) AcceptPkt(pkt gopacket.Packet, ifName string) {
 		// most of the time there will only be one LAN network, at most a few.
 		if fromInterface.NatEnabled {
 			for _, route := range n.internalRoutes {
-				if route.Contains(ipdst) {
+				if route.Contains(ipdst) && !fromInterface.IPv4Addr.Equal(ipdst) {
 					log.Debug().Msgf("Packet to %s:%s is internal. Sending straight out the right interface", ipsrc, ipdst)
 					n.routeInternally(ipv4, eth, pkt)
 					return
@@ -271,7 +272,7 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 
 	payload := icmp.Payload
 	outpkt := gopacket.NewPacket(payload, layers.LayerTypeIPv4, gopacket.Default)
-	log.Info().Msgf("=====================================Input pkts ------ =====================================\n%v\n%v", pkt, outpkt)
+	log.Debug().Msgf("=====================================Input pkts ------ =====================================\n%v\n%v", pkt, outpkt)
 
 	if outpkt == nil {
 		return ErrICMPFailure
@@ -332,7 +333,7 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 		return
 	}
 
-	log.Info().Msgf("=====================================output pkts for %s ------ =====================================\n%v\n%v", natkey, pkt, outpkt)
+	log.Debug().Msgf("=====================================output pkts for %s ------ =====================================\n%v\n%v", natkey, pkt, outpkt)
 	toInterface.Callback.SendBytes(buffer.Bytes())
 	return
 }
@@ -457,7 +458,8 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		udp.SetNetworkLayerForChecksum(ipv4)
 	} else if protocol == layers.IPProtocolICMPv4 {
 		icmp, _ = pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-		srcport = uint16(icmp.Seq)
+		srcport = uint16(icmp.Id)
+		dstport = uint16(icmp.Id)
 	} else if ipv4.Protocol == layers.IPProtocolIGMP {
 		log.Debug().Msgf("Trying to NAT IGMP. Going to pass this through, TODO - investigate")
 	} else {
@@ -484,7 +486,7 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 			udp.SrcPort = layers.UDPPort(forwardEntry.SrcPort)
 			udp.DstPort = layers.UDPPort(forwardEntry.DstPort)
 		} else if icmp != nil {
-			icmp.Seq = uint16(forwardEntry.SrcPort)
+			icmp.Id = uint16(forwardEntry.SrcPort)
 		}
 	} else {
 		// Not natted previously - find a new NAT if
@@ -513,7 +515,8 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 			pfkey := PortForwardingKey{ExternalPort: dstport, Protocol: protocol}
 			entry, ok := n.portForwardingTable[pfkey]
 			if !ok {
-				log.Debug().Msgf("Dropping pkt %s on %s as its not in the port forwarding table", natkey, fromInterface.IfName)
+				log.Warn().Msgf("Dropping pkt %s on %s as its not in the port forwarding table", natkey, fromInterface.IfName)
+				log.Debug().Msgf("pftable - %+v", n.table)
 				return
 			}
 			log.Info().Msgf("New packet matches port forwarding rule: %+v  ---- %+v", pfkey, entry)
@@ -535,9 +538,6 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 				udp.DstPort = layers.UDPPort(entry.InternalPort)
 			}
 
-			// } else if n.defaultGateway.IPv4Addr.Equal(ipv4.DstIP) {
-			// 	log.Info().Msg("Hairpinned packet session initiated")
-			// 	return
 		} else {
 			ipv4.SrcIP = n.defaultGateway.IPv4Addr
 			toInterface = &n.defaultGateway
@@ -556,13 +556,14 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 		// holds a reference to a key of the forward direction.
 		reverseEntry := &NatEntry{SrcPort: originalDstPort, DstPort: originalSrcPort, SrcIP: originalDstIp, Inf: fromInterface, DstIP: originalSourceIP, DstMac: eth.SrcMAC, ReverseKey: &natkey}
 		reverseKey := n.chooseSrcPort(dstport, srcport, &ipv4.DstIP, &expectedDstIP, &protocol, reverseEntry, 0)
+
 		srcport = reverseKey.DstPort
 		if tcp != nil {
 			tcp.SrcPort = layers.TCPPort(srcport)
 		} else if udp != nil {
 			udp.SrcPort = layers.UDPPort(srcport)
 		} else if icmp != nil {
-			icmp.Seq = uint16(srcport)
+			icmp.Id = uint16(srcport)
 		}
 		// Create new forward entries. hold a reference to a key of the reverse direction.
 		forwardEntry = &NatEntry{SrcPort: srcport, SrcIP: ipv4.SrcIP, Inf: toInterface, DstPort: dstport, DstIP: ipv4.DstIP, DstMac: eth.DstMAC, ReverseKey: reverseKey}
@@ -596,13 +597,14 @@ func (n *Nat) natPacket(pkt gopacket.Packet, ipv4 *layers.IPv4, eth *layers.Ethe
 // chooseSrcPort. Tries to pick a source port to use. Try the actual source port first (called 'port preservation' in the RFC).
 // If that fails, pick a port in the same range (0-1023 or 1024-65535 - rfc4787 REQ3), and keep parity (rfc4787 REQ4)
 func (n *Nat) chooseSrcPort(p1, selectPort uint16, i1, i2 *net.IP, prot *layers.IPProtocol, entry *NatEntry, recursionCount int) (tryKey *NatKey) {
+
 	tryKey = &NatKey{SrcPort: p1, DstPort: selectPort, SrcIP: i1.String(), DstIP: i2.String(), Protocol: *prot}
 	n.table.lock.Lock()
 
 	_, ok := n.table.table[*tryKey]
 	// Entry not in table, safe to create then return
 	// I think its safe to re-use the same id for ICMP - i think this happens in some cases (DestUnreach).
-	if !ok || *prot == layers.IPProtocolICMPv4 {
+	if !ok {
 		n.table.table[*tryKey] = entry
 		n.table.lock.Unlock()
 		log.Debug().Msgf("New NAT (reverse) for %s - %s", entry.Inf.IfName, tryKey)

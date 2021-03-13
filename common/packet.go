@@ -137,6 +137,15 @@ func ConvertPacket(pkt gopacket.Packet) []byte {
 	return buf.Bytes()
 }
 
+func ConvertPacketRuse(pkt gopacket.Packet, buf gopacket.SerializeBuffer) []byte {
+	err := gopacket.SerializePacket(buf, Options, pkt)
+	if err != nil {
+		log.Error().Err(err).Msgf("Failed to serialise packet? this shouldnt happen %s", pkt)
+	}
+
+	return buf.Bytes()
+}
+
 func GetIP(flow gopacket.NetworkLayer) (net.IP, net.IP) {
 	f := flow.NetworkFlow()
 	return net.IP(f.Src().Raw()), net.IP(f.Dst().Raw())

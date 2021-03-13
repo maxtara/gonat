@@ -1,6 +1,7 @@
 package dhcp
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"gonat/common"
@@ -17,7 +18,9 @@ var (
 )
 
 // Example using DHCP with a single network interface device
-func NewDHCPHandler(serverIP, start net.IP, serverNet net.IPNet, leaseCount int) *DHCPHandler {
+func NewDHCPHandler(serverIP, start, dns net.IP, serverNet net.IPNet, leaseCount int) *DHCPHandler {
+	mtu := []byte{0, 0}
+	binary.BigEndian.PutUint16(mtu, 1480)
 	return &DHCPHandler{
 		ip:            serverIP,
 		leaseDuration: 2 * time.Hour,
@@ -26,8 +29,9 @@ func NewDHCPHandler(serverIP, start net.IP, serverNet net.IPNet, leaseCount int)
 		leases:        make(map[int]lease, leaseCount),
 		options: dhcp.Options{
 			dhcp.OptionSubnetMask:       serverNet.Mask,
-			dhcp.OptionRouter:           serverIP.To4(),                 // Presuming Server is also your router
-			dhcp.OptionDomainNameServer: []byte{0x08, 0x08, 0x08, 0x08}, // Presuming Server is also your DNS server
+			dhcp.OptionRouter:           serverIP.To4(), // Presuming Server is also your router
+			dhcp.OptionDomainNameServer: dns.To4(),
+			dhcp.OptionInterfaceMTU:     mtu,
 		},
 	}
 }

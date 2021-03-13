@@ -35,6 +35,8 @@ ip addr flush dev eth2
 ip addr flush dev eth1
 ip addr flush dev veth1
 ip addr flush dev veth0
+ip addr flush dev veth2
+ip addr flush dev veth3
 
 # Turn off ipv6
 sysctl -w net.ipv6.conf.default.disable_ipv6=1
