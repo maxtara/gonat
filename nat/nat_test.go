@@ -27,6 +27,7 @@ var (
 	googleIP           = net.ParseIP("8.8.8.8")
 	wangw              = net.ParseIP("172.31.45.1")
 	wanclient          = net.ParseIP("172.20.112.88")
+	rawBytes           = []byte{0, 1, 2, 3, 4}
 	globalPacketHolder [3]gopacket.Packet
 	lock               sync.RWMutex
 	globalTestHolder   *testing.T
@@ -36,7 +37,7 @@ type testCallback struct {
 	ifno int
 }
 
-func (n testCallback) Send(pkt gopacket.Packet, i int) (err error) {
+func (n testCallback) Send(pkt Packet) (err error) {
 	lock.Lock()
 	defer lock.Unlock()
 	require.Nil(globalTestHolder, globalPacketHolder[n.ifno])
@@ -51,8 +52,7 @@ func (n testCallback) SendBytes(buf []byte) (err error) {
 func TestNAT(t *testing.T) {
 	globalTestHolder = t
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(zerolog.DebugLevel)
-
-	pkt := common.CreatePacketIPTCP(t, client1IP, googleIP, 2222, 443, common.TCPFlags{SYN: true})
+	pkt := CreatePacketIPTCP(t, client1IP, googleIP, 2222, 443, common.TCPFlags{SYN: true})
 	ipv4, _ := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 	eth := pkt.LinkLayer().(*layers.Ethernet)
 
@@ -98,7 +98,8 @@ func TestNAT(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		err := n.natPacket(pkt, ipv4, eth, &fromInterface, 0)
+		pkt.FromInterface = &fromInterface
+		err := n.natPacket(pkt, ipv4, eth)
 		require.Nil(t, err)
 		require.NotNil(t, globalPacketHolder[1])
 		require.Nil(t, globalPacketHolder[0])
@@ -118,7 +119,7 @@ func TestNAT(t *testing.T) {
 	testThreeWayHandShakeWithPort(t, n, uint16(2000), uint16(2000))
 
 	t.Log("############### TEST 3 - PING #################")
-	pkt = common.CreateICMPPacketTest(t, client1IP, googleIP, layers.ICMPv4TypeEchoRequest, 0)
+	pkt = CreateICMPPacketTest(t, client1IP, googleIP, layers.ICMPv4TypeEchoRequest, 0)
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "veth1")
@@ -131,7 +132,7 @@ func TestNAT(t *testing.T) {
 
 	// Create the reverse packet
 	t.Log("############### TEST 3. PING return #################")
-	pkt = common.CreateICMPPacketTest(t, googleIP, wanclient, layers.ICMPv4TypeEchoReply, 1)
+	pkt = CreateICMPPacketTest(t, googleIP, wanclient, layers.ICMPv4TypeEchoReply, 1)
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "eth0")
@@ -145,7 +146,7 @@ func TestNAT(t *testing.T) {
 
 	t.Log("############### TEST 4. Port forwarding. Drop packet with no rule #################")
 	n.table.DeleteAll()
-	pkt = common.CreatePacketIPTCP(t, googleIP, wanclient, 4444, 5555, common.TCPFlags{SYN: true})
+	pkt = CreatePacketIPTCP(t, googleIP, wanclient, 4444, 5555, common.TCPFlags{SYN: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "eth0")
@@ -155,7 +156,7 @@ func TestNAT(t *testing.T) {
 	t.Log("############### TEST 4. Port forwarding. Forward the packet. SYN #################")
 	n.table.DeleteAll()
 	n.portForwardingTable[PortForwardingKey{ExternalPort: 5555, Protocol: layers.IPProtocolTCP}] = PortForwardingEntry{InternalIP: client1IP, InternalPort: 4444}
-	pkt = common.CreatePacketIPTCP(t, googleIP, wanclient, 3333, 5555, common.TCPFlags{SYN: true})
+	pkt = CreatePacketIPTCP(t, googleIP, wanclient, 3333, 5555, common.TCPFlags{SYN: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 
@@ -185,7 +186,7 @@ func TestNAT(t *testing.T) {
 	require.Equal(t, dstportout, uint16(4444))
 	t.Log("############### TEST 4. Port forwarding. SYN-ACK #################")
 
-	pkt = common.CreatePacketIPTCP(t, client1IP.To4(), googleIP, 4444, srcportout, common.TCPFlags{SYN: true, ACK: true})
+	pkt = CreatePacketIPTCP(t, client1IP.To4(), googleIP, 4444, srcportout, common.TCPFlags{SYN: true, ACK: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "veth1")
@@ -200,7 +201,7 @@ func TestNAT(t *testing.T) {
 	require.Equal(t, dstportout, uint16(3333))
 
 	t.Log("############### TEST 4. Packet ACK #################")
-	pkt = common.CreatePacketIPTCP(t, googleIP, wanclient, 3333, 5555, common.TCPFlags{SYN: true, ACK: true})
+	pkt = CreatePacketIPTCP(t, googleIP, wanclient, 3333, 5555, common.TCPFlags{SYN: true, ACK: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "eth0")
@@ -278,7 +279,7 @@ func TestNAT(t *testing.T) {
 	n.table.DeleteAll()
 	n.portForwardingTable[PortForwardingKey{ExternalPort: 5555, Protocol: layers.IPProtocolTCP}] = PortForwardingEntry{InternalIP: client1IP, InternalPort: 4444}
 
-	pkt = common.CreatePacketIPTCP(t, client1IP, wanclient, 2223, 5555, common.TCPFlags{SYN: true})
+	pkt = CreatePacketIPTCP(t, client1IP, wanclient, 2223, 5555, common.TCPFlags{SYN: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	globalPacketHolder[2] = nil
@@ -298,7 +299,7 @@ func TestNAT(t *testing.T) {
 	n.table.DeleteAll()
 	n.portForwardingTable[PortForwardingKey{ExternalPort: 5555, Protocol: layers.IPProtocolTCP}] = PortForwardingEntry{InternalIP: client1IP, InternalPort: 4444}
 
-	pkt = common.CreatePacketIPTCP(t, client2IP, wanclient, 2223, 5555, common.TCPFlags{SYN: true})
+	pkt = CreatePacketIPTCP(t, client2IP, wanclient, 2223, 5555, common.TCPFlags{SYN: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	globalPacketHolder[2] = nil
@@ -315,7 +316,7 @@ func TestNAT(t *testing.T) {
 	require.Equal(t, srcportout, uint16(2223))
 	require.Equal(t, dstportout, uint16(4444))
 	t.Log("############### TEST 8. Hairpin TCP. Other LAN interface. SYN-ACK #################")
-	pkt = common.CreatePacketIPTCP(t, client1IP, wanclient, 4444, 2223, common.TCPFlags{SYN: true, ACK: true})
+	pkt = CreatePacketIPTCP(t, client1IP, wanclient, 4444, 2223, common.TCPFlags{SYN: true, ACK: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	globalPacketHolder[2] = nil
@@ -336,7 +337,7 @@ func TestNAT(t *testing.T) {
 
 func testThreeWayHandShakeWithPort(t *testing.T, n *Nat, srcport, expectedSrcPort uint16) {
 	t.Log("############### SYN #################")
-	pkt := common.CreatePacketIPTCP(t, client1IP, googleIP, srcport, 443, common.TCPFlags{SYN: true})
+	pkt := CreatePacketIPTCP(t, client1IP, googleIP, srcport, 443, common.TCPFlags{SYN: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "veth1")
@@ -352,7 +353,7 @@ func testThreeWayHandShakeWithPort(t *testing.T, n *Nat, srcport, expectedSrcPor
 
 	// Create the reverse packet
 	t.Log("############### Packet return  SYN-ACK #################")
-	pkt = common.CreatePacketIPTCP(t, googleIP, wanclient, 443, srcportout, common.TCPFlags{SYN: true, ACK: true})
+	pkt = CreatePacketIPTCP(t, googleIP, wanclient, 443, srcportout, common.TCPFlags{SYN: true, ACK: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "eth0")
@@ -367,7 +368,7 @@ func testThreeWayHandShakeWithPort(t *testing.T, n *Nat, srcport, expectedSrcPor
 	require.Equal(t, dstportout, uint16(srcport))
 
 	t.Log("############### Packet ACK #################")
-	pkt = common.CreatePacketIPTCP(t, client1IP, googleIP, srcport, 443, common.TCPFlags{ACK: true})
+	pkt = CreatePacketIPTCP(t, client1IP, googleIP, srcport, 443, common.TCPFlags{ACK: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "veth1")
@@ -381,7 +382,7 @@ func testThreeWayHandShakeWithPort(t *testing.T, n *Nat, srcport, expectedSrcPor
 	require.Equal(t, srcportout, uint16(expectedSrcPort)) //(t, srcportout, uint16(2000))
 	require.Equal(t, dstportout, uint16(443))
 	t.Log("############### Packet return  FIN #################")
-	pkt = common.CreatePacketIPTCP(t, googleIP, wanclient, 443, srcportout, common.TCPFlags{FIN: true})
+	pkt = CreatePacketIPTCP(t, googleIP, wanclient, 443, srcportout, common.TCPFlags{FIN: true})
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
 	n.AcceptPkt(pkt, "eth0")
@@ -404,4 +405,69 @@ func decodeTCPPacket(t *testing.T, pkt gopacket.Packet) (src, dst net.IP, srcpor
 func decodeIPPacket(t *testing.T, pkt gopacket.Packet) (src, dst net.IP) {
 	ipv4 := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 	return ipv4.SrcIP, ipv4.DstIP
+}
+
+//////////////////// TEST PACKET CREATION
+
+func CreatePacketIPTCP(t require.TestingT, src, dst net.IP, srcport, dstport uint16, flgas common.TCPFlags) (packet Packet) {
+
+	ethernetLayer := &layers.Ethernet{
+		SrcMAC:       net.HardwareAddr{0x00, 0x0F, 0xAA, 0xFA, 0xAA, 0x00},
+		DstMAC:       net.HardwareAddr{0x00, 0x0D, 0xBD, 0xBD, 0x00, 0xBD},
+		EthernetType: layers.EthernetTypeIPv4,
+	}
+	ipLayer := &layers.IPv4{
+		SrcIP:      src,
+		DstIP:      dst,
+		Version:    4,
+		TOS:        0,
+		Id:         0,
+		Flags:      0,
+		FragOffset: 0,
+		TTL:        64,
+		Protocol:   layers.IPProtocolTCP,
+	}
+	tcpLayer := &layers.TCP{
+		SrcPort: layers.TCPPort(srcport),
+		DstPort: layers.TCPPort(dstport),
+		FIN:     flgas.FIN,
+		SYN:     flgas.SYN,
+		RST:     flgas.RST,
+		PSH:     flgas.PSH,
+		ACK:     flgas.ACK,
+		URG:     flgas.URG,
+		ECE:     flgas.ECE,
+		CWR:     flgas.CWR,
+		NS:      flgas.NS,
+	}
+	tcpLayer.SetNetworkLayerForChecksum(ipLayer)
+	// And create the packet with the layers
+	buffer := gopacket.NewSerializeBuffer()
+	err := gopacket.SerializeLayers(buffer, common.Options,
+		ethernetLayer,
+		ipLayer,
+		tcpLayer,
+		gopacket.Payload(rawBytes),
+	)
+	require.Nil(t, err)
+	pkt := gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
+	return Packet{Packet: pkt}
+}
+
+func CreateICMPPacketTest(t require.TestingT, src, dst net.IP, icmpType, icmpCode uint8) (packet Packet) {
+	buffer, err := common.CreateICMPPacket(net.HardwareAddr{0x00, 0x0F, 0xAA, 0xFA, 0xAA, 0x00}, net.HardwareAddr{0x00, 0x0D, 0xBD, 0xBD, 0x00, 0xBD}, src, dst, icmpType, icmpCode)
+
+	require.Nil(t, err)
+	pkt := gopacket.NewPacket(buffer, layers.LayerTypeEthernet, gopacket.Default)
+	return Packet{Packet: pkt}
+}
+
+func CreatePacket(t require.TestingT) (packet Packet) {
+	return CreatePacketIPTCP(t, googleIP, googleIP, 2222, 2222, common.TCPFlags{})
+}
+func CreatePacketTCP(t require.TestingT, srcport, dstport uint16) (packet Packet) {
+	return CreatePacketIPTCP(t, googleIP, googleIP, srcport, dstport, common.TCPFlags{})
+}
+func CreatePacketIP(t require.TestingT, src, dst net.IP) (packet Packet) {
+	return CreatePacketIPTCP(t, src, dst, 2222, 2222, common.TCPFlags{})
 }

@@ -52,7 +52,8 @@ func (s Sniffer) Start1(nat *Nat, bpf string) (err error) {
 		errLayer := pkt.ErrorLayer()
 		if errLayer == nil {
 			log.Debug().Msgf("Packet received on %s: %v", s.ifName, pkt)
-			go nat.AcceptPkt(pkt, s.ifName)
+
+			go nat.AcceptPkt(Packet{Packet: pkt, ThreadNo: 0}, s.ifName)
 		} else {
 			log.Error().Interface("ErrorLayer", errLayer).Msgf("Error decoding a packet on %v", pkt)
 		}
@@ -90,7 +91,7 @@ func (s Sniffer) Start2(nat *Nat, bpf string) (err error) {
 				log.Warn().Msgf("Packet truncated. Capture length %d, Length %d", ci.CaptureLength, ci.Length)
 				return
 			}
-			nat.AcceptPkt(pkt, s.ifName)
+			nat.AcceptPkt(Packet{Packet: pkt}, s.ifName)
 
 		}(&data)
 	}
@@ -133,7 +134,7 @@ func (s Sniffer) Start3(nat *Nat, bpfz string) (err error) {
 			errLayer := pkt.ErrorLayer()
 			if errLayer == nil {
 				log.Debug().Msgf("Packet received on %s: %v", s.ifName, pkt)
-				go nat.AcceptPkt(pkt, s.ifName)
+				go nat.AcceptPkt(Packet{Packet: pkt}, s.ifName)
 			} else {
 				log.Error().Interface("ErrorLayer", errLayer).Msgf("Error decoding a packet on %v", pkt)
 			}
@@ -166,7 +167,7 @@ func (s Sniffer) Start4(nat *Nat, bpf string) (err error) {
 		for {
 			data, _, _ := handle.ReadPacketData()
 			pkt := gopacket.NewPacket(data, lt, gopacket.Default)
-			nat.AcceptPkt(pkt, s.ifName)
+			nat.AcceptPkt(Packet{Packet: pkt}, s.ifName)
 		}
 	}
 
@@ -201,7 +202,7 @@ func (s Sniffer) Start5(nat *Nat, bpf string) (err error) {
 		for {
 			data, _, _ := handle.ReadPacketData()
 			pkt := gopacket.NewPacket(data, lt, opts)
-			nat.AcceptPktThreaded(pkt, s.ifName, i)
+			nat.AcceptPkt(Packet{Packet: pkt, ThreadNo: i + 1}, s.ifName)
 		}
 	}
 
@@ -216,13 +217,13 @@ func (s Sniffer) Start5(nat *Nat, bpf string) (err error) {
 type Spitter struct {
 	ifName string
 	handle *pcap.Handle
-	bufs   [GoRoutineCount]gopacket.SerializeBuffer
+	bufs   [GoRoutineCount + 1]gopacket.SerializeBuffer
 }
 
 func CreateSpitter(ifName string, promisc bool) Dest {
 	s := Spitter{ifName: ifName}
-	s.bufs = [GoRoutineCount]gopacket.SerializeBuffer{}
-	for i := 0; i < GoRoutineCount; i++ {
+	s.bufs = [GoRoutineCount + 1]gopacket.SerializeBuffer{}
+	for i := 0; i < GoRoutineCount+1; i++ {
 		s.bufs[i] = gopacket.NewSerializeBuffer()
 	}
 	handle, err := pcap.OpenLive(ifName, SnapLen, promisc, pcap.BlockForever)
@@ -233,14 +234,14 @@ func CreateSpitter(ifName string, promisc bool) Dest {
 	return s
 }
 
-func (s Spitter) Send(pkt gopacket.Packet, threadCount int) (err error) {
-	buf := common.ConvertPacketRuse(pkt, &s.bufs[threadCount])
+func (s Spitter) Send(pkt Packet) (err error) {
+	buf := common.ConvertPacketRuse(pkt, &s.bufs[pkt.ThreadNo])
 	// log.Debug().Msgf("Writting pkt to interface %s. of len %d\n-----%s", s.ifName, len(pkt.Data()), hex.EncodeToString(pkt.Data()))
 	err = s.handle.WritePacketData(buf)
 	if err != nil {
 		log.Error().Err(err).Msgf("Ouch. This is probably just a too large packet - probably TSO related.")
 	}
-	s.bufs[threadCount].Clear()
+	s.bufs[pkt.ThreadNo].Clear()
 
 	return
 }
