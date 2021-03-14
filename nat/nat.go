@@ -190,7 +190,7 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 					}
 					return // Sent packet or error'd. Dont NAT, return.
 				} else if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoReply {
-					log.Debug().Msgf("Got an ICMP response to %s:%s. Going to pass through to NAT, as its probably a clients packet - %s", ipsrc, ipdst, icmp.TypeCode)
+					log.Debug().Msgf("Got an ICMP response to %s->%s. Going to pass through to NAT, as its probably a clients packet", ipsrc, ipdst)
 
 				} else {
 					// Currently tested on ICMPv4TypeTimeExceeded and ICMPv4TypeDestinationUnreachable.
@@ -201,6 +201,8 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 					return
 
 				}
+			} else if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoRequest || icmp.TypeCode.Type() == layers.ICMPv4TypeEchoReply { //pkt.FromInterface.IPv4Network.Contains(ipsrc) &&
+				log.Debug().Msgf("Got an ICMP packet from %s->%s. Going to pass through to NAT, as its probably a clients packet", ipsrc, ipdst)
 			} else {
 				log.Debug().Msgf("Got an ICMP response to %s:%s. Code=%s", ipsrc, ipdst, icmp.TypeCode)
 				err := n.handleOtherICMP(eth, ipv4, icmp, pkt)
