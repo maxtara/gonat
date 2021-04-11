@@ -2,6 +2,7 @@ package common
 
 import (
 	"errors"
+	"fmt"
 	"net"
 
 	"github.com/google/gopacket"
@@ -71,4 +72,14 @@ func CreateICMPPacket(srcmac, dstmac net.HardwareAddr, src, dst net.IP, icmpType
 		return nil, err
 	}
 	return buffer.Bytes(), err
+}
+
+func LogSimpleNDPI(pkt gopacket.Packet, src, dst net.IP, srcp, dstp uint16, protocol layers.IPProtocol) (str string) {
+	srvc1 := GetProtoByNumber(int(srcp))
+	srvc2 := GetProtoByNumber(int(dstp))
+	str = fmt.Sprintf("%s:%d -> %s:%d %s (%v)(%v)", src, srcp, dst, dstp, protocol, srvc1, srvc2)
+	if srcp == 9999 && dstp == 9999 {
+		str += "(GoogleHome)"
+	}
+	return str
 }

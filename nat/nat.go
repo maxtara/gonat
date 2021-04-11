@@ -507,7 +507,8 @@ func (n *Nat) natPacket(pkt Packet, ipv4 *layers.IPv4, eth *layers.Ethernet) (er
 			pfkey := PortForwardingKey{ExternalPort: dstport, Protocol: protocol}
 			entry, ok := n.portForwardingTable[pfkey]
 			if !ok {
-				log.Warn().Msgf("Dropping pkt %s on %s as its not in the port forwarding table", natkey, pkt.FromInterface.IfName)
+				str := common.LogSimpleNDPI(pkt, ipv4.SrcIP, ipv4.DstIP, srcport, dstport, protocol)
+				log.Warn().Msgf("Dropping pkt %s. Not in forwarding table", str)
 				return
 			}
 			log.Info().Msgf("New packet matches port forwarding rule: %+v  ---- %+v", pfkey, entry)
