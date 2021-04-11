@@ -83,3 +83,20 @@ func LogSimpleNDPI(pkt gopacket.Packet, src, dst net.IP, srcp, dstp uint16, prot
 	}
 	return str
 }
+
+func String2IPProto(str string) (layers.IPProtocol, error) {
+	switch str {
+	case "tcp":
+		return layers.IPProtocolTCP, nil
+	case "udp":
+		return layers.IPProtocolUDP, nil
+	case "icmp":
+		return layers.IPProtocolICMPv4, nil
+	case "ipv6":
+		return layers.IPProtocolIPv6, nil
+	case "ipv4":
+		return layers.IPProtocolIPv4, nil
+	default:
+		return 0, errors.New("unknown protocol")
+	}
+}

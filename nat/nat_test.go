@@ -45,7 +45,11 @@ func (n testCallback) Send(pkt Packet) (err error) {
 	return
 }
 func (n testCallback) SendBytes(buf []byte) (err error) {
-	require.Nil(globalTestHolder, buf)
+	lock.Lock()
+	defer lock.Unlock()
+	require.Nil(globalTestHolder, globalPacketHolder[n.ifno])
+	pkt := gopacket.NewPacket(buf, layers.LayerTypeEthernet, gopacket.Default)
+	globalPacketHolder[n.ifno] = pkt
 	return
 }
 

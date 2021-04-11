@@ -5,10 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"gonat/common"
-	"math/rand"
 	"net"
 	"sync"
-	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/ip4defrag"
@@ -18,14 +16,15 @@ import (
 )
 
 var (
-	_, ZeroSlashZero, _ = net.ParseCIDR("0.0.0.0/0")
-	_, MultiCast, _     = net.ParseCIDR("224.0.0.0/4")
-	BroadCast           = net.ParseIP("255.255.255.255")
-	ZeroAddress         = net.ParseIP("0.0.0.0")
-	ErrICMPFailure      = errors.New("icmp failure")
-	ErrARPFailure       = errors.New("arp failure")
-	ErrNATFailure       = errors.New("nat failure")
-	zeroHWAddr          = []byte{0, 0, 0, 0, 0, 0}
+	_, ZeroSlashZero, _     = net.ParseCIDR("0.0.0.0/0")
+	_, MultiCast, _         = net.ParseCIDR("224.0.0.0/4")
+	BroadCast               = net.ParseIP("255.255.255.255")
+	ZeroAddress             = net.ParseIP("0.0.0.0")
+	ErrICMPFailure          = errors.New("icmp failure")
+	ErrARPFailure           = errors.New("arp failure")
+	ErrNATFailure           = errors.New("nat failure")
+	zeroHWAddr              = []byte{0, 0, 0, 0, 0, 0}
+	PktSerialisationOptions = gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 )
 
 type Nat struct {
@@ -39,8 +38,8 @@ type Nat struct {
 	portForwardingTable map[PortForwardingKey]PortForwardingEntry
 }
 
+// Create the nat, given a default gateway, list of LAN devices and list of port forwarding rules
 func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat) {
-	rand.Seed(time.Now().UnixNano())
 	n = &Nat{
 		defaultGateway:      defaultGateway,
 		ip4defrager:         ip4defrag.NewIPv4Defragmenter(),
@@ -53,12 +52,7 @@ func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat
 	}
 	for _, pf := range pfs {
 		rangePorts := pf.ExternalPortEnd - pf.ExternalPortStart
-		var protocol layers.IPProtocol
-		if pf.Protocol == "tcp" {
-			protocol = layers.IPProtocolTCP
-		} else {
-			protocol = layers.IPProtocolUDP
-		}
+		protocol, _ := common.String2IPProto(pf.Protocol)
 		for i := uint16(0); i <= rangePorts; i++ {
 			key := PortForwardingKey{
 				ExternalPort: pf.ExternalPortStart + i,
@@ -82,12 +76,13 @@ func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat
 	return
 }
 
-// AcceptPkt decides what to do with a packet. I'm assuming all the packet layers are correct, so don't use the lazy option of gopacket
+// AcceptPkt decides what to do with a packet.
 // I _think_ this is safe, and gopacket will throw an error before even getting here, TODO - test
 func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 
 	eth := pkt.LinkLayer().(*layers.Ethernet)
 	// From ipset
+	// Get a reference to the interface we recieved this pkt on. Store it with the packet
 	fromInterfacetmp, ok := n.interfaces[ifName]
 	if !ok {
 		log.Fatal().Msgf("Could not find interface %s.", ifName)
@@ -97,7 +92,7 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 	if eth.EthernetType == layers.EthernetTypeIPv4 {
 		ipv4, _ := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 		ipsrc, ipdst := common.GetIP(pkt.NetworkLayer())
-		// Not from or two our interfaces - probably broadcast - routing isnt supported currently
+		// Not from/to our the recieving interface. Probably broadcast, otherwise, maybe you likely have done something wrong
 		if !(pkt.FromInterface.IPv4Network.Contains(ipsrc) || pkt.FromInterface.IPv4Network.Contains(ipdst)) {
 
 			// Check for DHCP here, only if its enabled on this interface.
@@ -125,14 +120,10 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 			// Not from our subnets or a broadcast
 			log.Warn().Msgf("Packet on %s appears to be from other subnet, not yet supported. %s  does not contain either  %s not %s - dropping", ifName, pkt.FromInterface.IPv4Network, ipsrc, ipdst)
 			return
-		}
-
-		if MultiCast.Contains(ipdst) {
+		} else if MultiCast.Contains(ipdst) {
 			log.Debug().Msgf("Dropping multicast packet for now -")
 			return
-		}
-
-		if ipv4.TTL == 0 {
+		} else if ipv4.TTL == 0 {
 			log.Debug().Msgf("Dropping packet with TTL 0, sending Time Exceeded back")
 			if err := sendICMPPacketReverse(ipv4, eth, pkt.FromInterface, layers.ICMPv4TypeTimeExceeded, layers.ICMPv4CodeTTLExceeded); err != nil {
 				log.Error().Err(err).Msgf("failed to send packet %s", err)
@@ -150,9 +141,10 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 				return
 			}
 		}
-
+		// Check for ip fragmentation. If so, wait for more defrags, then continue
+		// Looking at the code, this looks threadsafe, but i havnt tested it
 		if ipv4.Flags&layers.IPv4MoreFragments == layers.IPv4MoreFragments || ipv4.FragOffset > 0 {
-			log.Info().Msgf("Got a fragmented IP packet, attempting to defrag it")
+			log.Debug().Msgf("Got a fragmented IP packet, attempting to defrag it")
 			ipv4Out, err := n.ip4defrager.DefragIPv4(ipv4)
 			if err != nil {
 				log.Error().Err(err).Msgf("failed to defrag the pkt %s", err)
@@ -171,15 +163,15 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 				return
 			}
 
-			pktNew := gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
-
-			log.Info().Msgf("Successfully defragged the pkt, congrats! New length is - %v", pktNew)
-			pkt.Packet = pktNew
+			pkt.Packet = gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
+			log.Info().Msgf("Successfully defragged the pkt, congrats! New length is %d", len(pkt.Packet.Data()))
+			// Update the helper vars/pointers in this func
 			ipv4, _ = pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
 			ipsrc, ipdst = common.GetIP(pkt.NetworkLayer())
 		}
 
-		// Check if its icmp, and its addressed to ourself
+		// ICMP code here.
+		// If its adressed to myself, pretty easy to handle
 		if ipv4.Protocol == layers.IPProtocolICMPv4 {
 			icmp, _ := pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
 			if ipdst.Equal(pkt.FromInterface.IPv4Addr) {
@@ -233,7 +225,8 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 		return
 
 	} else if eth.EthernetType == layers.EthernetTypeIPv6 {
-		// TODO. ignoring ipv6 for now - who uses it _anyway_?
+		log.Debug().Msgf("Got an IPv6 packet. Dropping. %s", pkt)
+
 	} else if eth.EthernetType == layers.EthernetTypeARP {
 		arp, _ := pkt.Layer(layers.LayerTypeARP).(*layers.ARP)
 		log.Debug().Msgf("Arg message receieved-  %+v", arp)
@@ -242,7 +235,7 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 			if err := sendARPResponse(arp, eth, pkt); err != nil {
 				log.Error().Err(err).Msgf("failed to send packet %s", err)
 			}
-			return // Sent packet or error'd. Dont NAT, return.
+			return
 
 		} else {
 			// Else, some other ARP message. Lets just update the ARP table from the messages regardless of who its for. No possible poising issue here. updateArpTable checks for zero byte macs
@@ -318,7 +311,7 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 		udp.SrcPort = layers.UDPPort(forwardEntry.DstPort)
 
 	}
-	err = gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}, eth, ipv4, icmp, gopacket.Payload(common.ConvertPacket(outpkt)))
+	err = gopacket.SerializeLayers(buffer, PktSerialisationOptions, eth, ipv4, icmp, gopacket.Payload(common.ConvertPacket(outpkt)))
 
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to serialize packet %s", err)
@@ -330,6 +323,7 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 	return
 }
 
+// routeInternally - routes a packet to another LAN interface
 func (n *Nat) routeInternally(ipv4 *layers.IPv4, eth *layers.Ethernet, pkt Packet) (err error) {
 	arpEntry, err := n.getEthAddr(ipv4.DstIP)
 	if err != nil {
@@ -390,7 +384,7 @@ func sendDHCPResponse(eth *layers.Ethernet, ipv4 *layers.IPv4, udp *layers.UDP, 
 	udp.SetNetworkLayerForChecksum(ipv4)
 
 	buffer := gopacket.NewSerializeBuffer()
-	err = gopacket.SerializeLayers(buffer, gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}, eth, ipv4, udp, gopacket.Payload(content))
+	err = gopacket.SerializeLayers(buffer, PktSerialisationOptions, eth, ipv4, udp, gopacket.Payload(content))
 	if err != nil {
 		log.Error().Err(err).Msgf("failed to serialize packet %s", err)
 		return
@@ -424,7 +418,7 @@ func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt Packet) (err err
 	return
 }
 
-// natPacket - I'm going to blindly trust that the layer4 protocol will decode. Trusting that gopacket when lazy=false
+// natPacket - handles a packet that is destined for a NAT entry
 func (n *Nat) natPacket(pkt Packet, ipv4 *layers.IPv4, eth *layers.Ethernet) (err error) {
 	var srcport, dstport uint16
 	var tcp *layers.TCP
@@ -768,7 +762,7 @@ func (n *Nat) doArp(dst net.IP, intf *Interface) (err error) {
 	}
 	buffer := gopacket.NewSerializeBuffer()
 	err = gopacket.SerializeLayers(buffer,
-		gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true},
+		PktSerialisationOptions,
 		eth,
 		arp,
 	)
@@ -777,7 +771,7 @@ func (n *Nat) doArp(dst net.IP, intf *Interface) (err error) {
 	}
 	pkt := gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
 	log.Debug().Msgf("======= Sending %v", pkt)
-	err = intf.Callback.Send(Packet{Packet: pkt, ThreadNo: 0})
+	err = intf.Callback.SendBytes(buffer.Bytes())
 	if err != nil {
 		return
 	}

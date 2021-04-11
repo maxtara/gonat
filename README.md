@@ -13,7 +13,7 @@ This could potentially work as a simple home NAT, if you have a seperate modem.
   * Routing between LAN interfaces
   * Single WAN interface
   * Optional DHCP server on each LAN interface, additionally can setup static IP entries
-  * Mostly RFC compliant (details below)
+  * RFC compliant (details below)
   * Supports IPv4 only.
   * FTP not supported.
   * Fragmentation supported, but only on the input (does not fragment out currently).
@@ -98,7 +98,7 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
 #### Possible Next features
   
   * DNS
-  * DHCP client on WAN client
+  * DHCP client on WAN interface
   * Upnp
   * port knocking
   
