@@ -73,7 +73,7 @@ func (h *afpacketHandle) ZeroCopyReadPacketData() (data []byte, ci gopacket.Capt
 func (h *afpacketHandle) SetBPFFilter(filter string, snaplen int) (err error) {
 	pcapBPF, err := pcap.CompileBPFFilter(layers.LinkTypeEthernet, snaplen, filter)
 	if err != nil {
-		return err
+		return fmt.Errorf("error compiling bpf filter: %w", err)
 	}
 	bpfIns := []bpf.RawInstruction{}
 	for _, ins := range pcapBPF {
@@ -85,8 +85,8 @@ func (h *afpacketHandle) SetBPFFilter(filter string, snaplen int) (err error) {
 		}
 		bpfIns = append(bpfIns, bpfIns2)
 	}
-	if h.TPacket.SetBPF(bpfIns); err != nil {
-		return err
+	if err = h.TPacket.SetBPF(bpfIns); err != nil {
+		return fmt.Errorf("error setting bpf filter: %w", err)
 	}
 	return h.TPacket.SetBPF(bpfIns)
 }

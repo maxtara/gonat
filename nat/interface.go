@@ -32,7 +32,7 @@ type Interface struct {
 
 // Source - a source of packets. Interface to make it easier to test with.
 type Source interface {
-	Start(nat *Nat, bpf string) (err error)
+	Start(nat *Nat, bpf string)
 }
 
 // Dest - a Destination of packets. Interface to make it easier to test with.

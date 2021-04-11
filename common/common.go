@@ -1,3 +1,7 @@
+/*
+common holds common unitility functions.
+Gopacket stuff, ip address utils, Ethernet utils etc
+*/
 package common
 
 import (

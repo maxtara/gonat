@@ -29,6 +29,14 @@ const (
 	TCPClosed      uint8 = 0x0b
 )
 
+// Nattable - the nat table!
+// Key is a classic layer3/layer4 5-tuple.
+// Entry is where to send it, and what to set the layer3/layer 4 to.
+type Nattable struct {
+	table map[NatKey]*NatEntry
+	lock  sync.RWMutex
+}
+
 // TCPCloseState - We're not going to track the TCP connection state fully (for now at least)
 // Only when a FIN is received. At that point State will become FIN_WAIT1 or CLOSE_WAIT
 // So if State is < FinWait1 (0x04), do nothing with the packet unless we see a FIN
@@ -52,11 +60,6 @@ type NatEntry struct {
 	DstMac           net.HardwareAddr
 	ReverseKey       *NatKey
 	TcpState         TCPCloseState
-}
-
-type Nattable struct {
-	table map[NatKey]*NatEntry
-	lock  sync.RWMutex
 }
 
 // StartGarbageCollector - clean up (remove) closed NAT entries.
@@ -139,30 +142,6 @@ func (k NatKey) Reverse() NatKey {
 		Protocol: k.Protocol,
 	}
 }
-
-// func (n *Nattable) Get(key NatKey) ([]byte, error) {
-// 	entry, ok := n.table[key]
-// 	if !ok {
-// 		return nil, ErrEntryNotFound
-// 	}
-// 	return []byte(entry.IfName), nil
-// }
-
-// func (n *Nattable) Put(key NatKey, value []byte) error {
-// 	return nil
-// }
-
-// func (n *Nattable) Delete(key NatKey) error {
-// 	return nil
-// }
-
-// func (n *Nattable) List() ([]NatKey, error) {
-// 	return nil, nil
-// }
-
-// func (n *Nattable) Close() error {
-// 	return nil
-// }
 
 func (k NatKey) String() string {
 	return fmt.Sprintf("(%s:%d->%s:%d)", k.SrcIP, k.SrcPort, k.DstIP, k.DstPort)

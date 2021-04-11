@@ -15,7 +15,6 @@ import (
 // And then we'll check to see if the response is for one of our threads.
 // If it is, we'll send a signal to that thread to wake it up.
 // If it's not, we'll ignore it.
-// This is a little bit of a hack, but it works.
 // The main thing to note is that we're using a single thread to handle all of the ARP responses.
 
 type ArpEntry struct {

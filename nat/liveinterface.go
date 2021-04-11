@@ -25,12 +25,15 @@ func CreateSniffer(ifName string, promisc bool) Source {
 	return Sniffer{ifName: ifName, promisc: promisc}
 }
 
-func (s Sniffer) Start(nat *Nat, bpf string) (err error) {
-	return s.Start5(nat, bpf)
+// Start - start the sniffer.
+// There are a bunch of different ways to open a live interface, and process the incoming packets using multiple threads.
+// I've left them all here, and will continue tinkering/performance testing.
+func (s Sniffer) Start(nat *Nat, bpf string) {
+	s.Start5(nat, bpf)
 }
 
-// version 1
-func (s Sniffer) Start1(nat *Nat, bpf string) (err error) {
+// version 1. More or less the easy way, from gopacket docs
+func (s Sniffer) Start1(nat *Nat, bpf string) {
 
 	handle, err := pcap.OpenLive(s.ifName, SnapLen, true, pcap.BlockForever)
 	if err != nil {
@@ -58,11 +61,11 @@ func (s Sniffer) Start1(nat *Nat, bpf string) (err error) {
 			log.Error().Interface("ErrorLayer", errLayer).Msgf("Error decoding a packet on %v", pkt)
 		}
 	}
-	return
 }
 
-// Version 2
-func (s Sniffer) Start2(nat *Nat, bpf string) (err error) {
+// Version 2, not using the easy Packets() chanel, , copying the data myself.
+// Using one goroutine per packet. I thought this would be too many goroutines but it works ok.
+func (s Sniffer) Start2(nat *Nat, bpf string) {
 
 	handle, err := pcap.OpenLive(s.ifName, SnapLen, true, pcap.BlockForever)
 	if err != nil {
@@ -97,8 +100,8 @@ func (s Sniffer) Start2(nat *Nat, bpf string) (err error) {
 	}
 }
 
-// Version 3
-func (s Sniffer) Start3(nat *Nat, bpfz string) (err error) {
+// Version 3, AFPACKET. Only minimal testing with this, did not perform well in my enviroment.
+func (s Sniffer) Start3(nat *Nat, bpfz string) {
 
 	iface := s.ifName
 	snaplen := 65535
@@ -142,44 +145,10 @@ func (s Sniffer) Start3(nat *Nat, bpfz string) (err error) {
 		}(data)
 
 	}
-	return
 }
 
-// v4
-func (s Sniffer) Start4(nat *Nat, bpf string) (err error) {
-
-	handle, err := pcap.OpenLive(s.ifName, SnapLen, true, pcap.BlockForever)
-	if err != nil {
-		panic(err)
-	}
-	defer handle.Close()
-	err = handle.SetBPFFilter(bpf)
-
-	if err != nil {
-		panic(err)
-	}
-
-	log.Info().Msgf("Started listening on %s with BPF filter %s", s.ifName, bpf)
-
-	// ------------ VERSION 4
-	lt := handle.LinkType()
-	runAsync := func() {
-		for {
-			data, _, _ := handle.ReadPacketData()
-			pkt := gopacket.NewPacket(data, lt, gopacket.Default)
-			nat.AcceptPkt(Packet{Packet: pkt}, s.ifName)
-		}
-	}
-
-	for i := 0; i < GoRoutineCount-1; i++ {
-		go runAsync()
-	}
-	runAsync()
-	return
-}
-
-// v5
-func (s Sniffer) Start5(nat *Nat, bpf string) (err error) {
+// v5. Limited to N goroutines. Each one gets its own ThreadNo in the packet, as i am reusing the output pkt buffer
+func (s Sniffer) Start5(nat *Nat, bpf string) {
 
 	handle, err := pcap.OpenLive(s.ifName, SnapLen, true, pcap.BlockForever)
 	if err != nil {
@@ -210,7 +179,6 @@ func (s Sniffer) Start5(nat *Nat, bpf string) (err error) {
 		go runAsync(i)
 	}
 	runAsync(GoRoutineCount - 1)
-	return
 }
 
 // Spitter - yea terrible name i know, you have a sniffer and a spitter. Sniff on one interface, spit out the other.
@@ -236,14 +204,11 @@ func CreateSpitter(ifName string, promisc bool) Dest {
 
 func (s Spitter) Send(pkt Packet) (err error) {
 	buf := common.ConvertPacketRuse(pkt, &s.bufs[pkt.ThreadNo])
-	// log.Debug().Msgf("Writting pkt to interface %s. of len %d\n-----%s", s.ifName, len(pkt.Data()), hex.EncodeToString(pkt.Data()))
 	err = s.handle.WritePacketData(buf)
 	if err != nil {
 		log.Error().Err(err).Msgf("Ouch. This is probably just a too large packet - probably TSO related.")
 	}
-	s.bufs[pkt.ThreadNo].Clear()
-
-	return
+	return s.bufs[pkt.ThreadNo].Clear()
 }
 
 func (s Spitter) SendBytes(buf []byte) (err error) {

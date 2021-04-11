@@ -1,3 +1,7 @@
+/*
+Package nat implements a simple NAPT (Network Address Port Translation)
+
+*/
 package nat
 
 import (
@@ -15,6 +19,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
+// Constants used in the package
 var (
 	_, ZeroSlashZero, _     = net.ParseCIDR("0.0.0.0/0")
 	_, MultiCast, _         = net.ParseCIDR("224.0.0.0/4")
@@ -27,18 +32,25 @@ var (
 	PktSerialisationOptions = gopacket.SerializeOptions{FixLengths: true, ComputeChecksums: true}
 )
 
+// Nat stores the state of the NAT
 type Nat struct {
-	table               Nattable
-	interfaces          map[string]Interface
-	internalRoutes      []net.IPNet
-	defaultGateway      Interface
-	arpNotify           ARPNotify
-	ip4defrager         *ip4defrag.IPv4Defragmenter
-	srcPortLock         sync.Mutex
+	// Main NAT table. Mapping of tuples, to output tuples
+	table Nattable
+	// Router Interfaces
+	interfaces map[string]Interface
+	// Internal routes. Minor optimisation to store the routes here, when I am routing internally.
+	internalRoutes []net.IPNet
+	// Only one default gateway currently
+	defaultGateway Interface
+	// ARP handler/cache
+	arpNotify ARPNotify
+	// ipv4 defragmentation handler
+	ip4defrager *ip4defrag.IPv4Defragmenter
+	// port forwarding table. All good NATs have port forwarding
 	portForwardingTable map[PortForwardingKey]PortForwardingEntry
 }
 
-// Create the nat, given a default gateway, list of LAN devices and list of port forwarding rules
+// CreateNat - Create the nat, given a default gateway, list of LAN devices and list of port forwarding rules
 func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat) {
 	n = &Nat{
 		defaultGateway:      defaultGateway,
@@ -47,7 +59,6 @@ func CreateNat(defaultGateway Interface, lans []Interface, pfs []PFRule) (n *Nat
 		internalRoutes:      make([]net.IPNet, len(lans)),
 		table:               Nattable{table: make(map[NatKey]*NatEntry), lock: sync.RWMutex{}},
 		arpNotify:           ARPNotify{},
-		srcPortLock:         sync.Mutex{},
 		portForwardingTable: make(map[PortForwardingKey]PortForwardingEntry),
 	}
 	for _, pf := range pfs {
@@ -212,7 +223,9 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 			for _, route := range n.internalRoutes {
 				if route.Contains(ipdst) && !pkt.FromInterface.IPv4Addr.Equal(ipdst) {
 					log.Debug().Msgf("Packet to %s:%s is internal. Sending straight out the right interface", ipsrc, ipdst)
-					n.routeInternally(ipv4, eth, pkt)
+					if err := n.routeInternally(ipv4, eth, pkt); err != nil {
+						log.Error().Err(err).Msgf("failed to route packet %s", err)
+					}
 					return
 				}
 			}
@@ -272,13 +285,13 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 	if udp != nil {
 		srcport = uint16(udp.SrcPort)
 		dstport = uint16(udp.DstPort)
-		udp.SetNetworkLayerForChecksum(ipv4)
+		_ = udp.SetNetworkLayerForChecksum(ipv4)
 	}
 	tcp, _ := outpkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
 	if tcp != nil {
 		srcport = uint16(tcp.SrcPort)
 		dstport = uint16(tcp.DstPort)
-		tcp.SetNetworkLayerForChecksum(ipv4)
+		_ = tcp.SetNetworkLayerForChecksum(ipv4)
 
 	}
 	icmpNew, _ := outpkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
@@ -319,7 +332,9 @@ func (n *Nat) handleOtherICMP(eth *layers.Ethernet, ipv4 *layers.IPv4, icmp *lay
 	}
 
 	log.Debug().Msgf("=====================================output pkts for %s ------ =====================================\n%v\n%v", natkey, pkt, outpkt)
-	toInterface.Callback.SendBytes(buffer.Bytes())
+	if err = toInterface.Callback.SendBytes(buffer.Bytes()); err != nil {
+		log.Error().Err(err).Msgf("failed to send packet %s", err)
+	}
 	return
 }
 
@@ -345,7 +360,7 @@ func (n *Nat) routeInternally(ipv4 *layers.IPv4, eth *layers.Ethernet, pkt Packe
 func sendICMPPacketReverse(ipv4 *layers.IPv4, eth *layers.Ethernet, fromInterface *Interface, icmpType, icmpCode uint8) error {
 	buf, err := common.CreateICMPPacket(eth.DstMAC, eth.SrcMAC, ipv4.DstIP, ipv4.SrcIP, icmpType, icmpCode)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to create ICMP packet %w", err)
 	}
 	return fromInterface.Callback.SendBytes(buf)
 }
@@ -381,7 +396,7 @@ func sendDHCPResponse(eth *layers.Ethernet, ipv4 *layers.IPv4, udp *layers.UDP, 
 	udp.DstPort = udp.SrcPort
 	udp.SrcPort = oldIp
 
-	udp.SetNetworkLayerForChecksum(ipv4)
+	_ = udp.SetNetworkLayerForChecksum(ipv4)
 
 	buffer := gopacket.NewSerializeBuffer()
 	err = gopacket.SerializeLayers(buffer, PktSerialisationOptions, eth, ipv4, udp, gopacket.Payload(content))
@@ -419,6 +434,7 @@ func sendARPResponse(arp *layers.ARP, eth *layers.Ethernet, pkt Packet) (err err
 }
 
 // natPacket - handles a packet that is destined for a NAT entry
+// The NAT code is kept seperate here, so conversion to ipv6+ipv4 can be neater. I'll need to make a new interface to gopacket.Packet first.
 func (n *Nat) natPacket(pkt Packet, ipv4 *layers.IPv4, eth *layers.Ethernet) (err error) {
 	var srcport, dstport uint16
 	var tcp *layers.TCP
@@ -431,17 +447,15 @@ func (n *Nat) natPacket(pkt Packet, ipv4 *layers.IPv4, eth *layers.Ethernet) (er
 	ipv4.TTL -= 1
 
 	if protocol == layers.IPProtocolTCP {
-		// Get actual TCP data from this layer
 		tcp, _ = pkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
 		srcport = uint16(tcp.SrcPort)
 		dstport = uint16(tcp.DstPort)
-		tcp.SetNetworkLayerForChecksum(ipv4)
+		_ = tcp.SetNetworkLayerForChecksum(ipv4)
 	} else if protocol == layers.IPProtocolUDP {
-		// Get actual UDP data from this layer
 		udp, _ = pkt.Layer(layers.LayerTypeUDP).(*layers.UDP)
 		srcport = uint16(udp.SrcPort)
 		dstport = uint16(udp.DstPort)
-		udp.SetNetworkLayerForChecksum(ipv4)
+		_ = udp.SetNetworkLayerForChecksum(ipv4)
 	} else if protocol == layers.IPProtocolICMPv4 {
 		icmp, _ = pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
 		srcport = uint16(icmp.Id)
@@ -454,11 +468,10 @@ func (n *Nat) natPacket(pkt Packet, ipv4 *layers.IPv4, eth *layers.Ethernet) (er
 	log.Debug().Msgf("Input packet - %s==(%s:%d->%s:%d)", pkt.FromInterface.IfName, ipv4.SrcIP, srcport, ipv4.DstIP, dstport)
 	// Unique Tuple for this packet
 	natkey := NatKey{SrcPort: srcport, DstPort: dstport, SrcIP: ipv4.SrcIP.String(), DstIP: ipv4.DstIP.String(), Protocol: protocol}
-	// Decide if we should nat the packet. First check if we would NAT this packet anyway
+	// Decide if we should nat the packet. First check if we have a NAT entry for this tuple already - in which case just send it out acording to the entry
 	forwardEntry := n.table.Get(natkey)
 
 	if forwardEntry != nil {
-		// Already natted previously - keep the same NAT
 		log.Debug().Msgf("Already NAT'e'd %s. Using old entry %v", natkey, forwardEntry)
 
 		ipv4.DstIP = forwardEntry.DstIP
@@ -575,7 +588,6 @@ func (n *Nat) natPacket(pkt Packet, ipv4 *layers.IPv4, eth *layers.Ethernet) (er
 	}
 	// Update NAT table for sent packet - so next packet can use the same tuple.
 	n.table.Store(natkey, forwardEntry)
-	// log.Info().Msgf("Redo NAT for %s - %v %v", toInterface.IfName, natkey, forwardEntry)
 
 	return
 }
@@ -589,7 +601,6 @@ func (n *Nat) chooseSrcPort(p1, selectPort uint16, i1, i2 *net.IP, prot *layers.
 
 	_, ok := n.table.table[*tryKey]
 	// Entry not in table, safe to create then return
-	// I think its safe to re-use the same id for ICMP - i think this happens in some cases (DestUnreach).
 	if !ok {
 		n.table.table[*tryKey] = entry
 		n.table.lock.Unlock()
@@ -609,6 +620,7 @@ func (n *Nat) chooseSrcPort(p1, selectPort uint16, i1, i2 *net.IP, prot *layers.
 
 	if recursionCount > 10 {
 		log.Warn().Msgf("Recursive limit exceeded, definately a big issue.")
+		n.table.lock.Unlock()
 		return nil
 	}
 
@@ -736,7 +748,7 @@ func (n *Nat) getEthAddr(ip net.IP) (ArpEntry, error) {
 func (n *Nat) updateArpTable(mac net.HardwareAddr, ip net.IP, interfaceName string) {
 
 	// If mac is not 0:0:0:0:0:0, then update ARP table.
-	if !bytes.Equal(mac, []byte{0, 0, 0, 0, 0, 0}) {
+	if !bytes.Equal(mac, zeroHWAddr) {
 		n.arpNotify.AddArpEntry(ip, mac, interfaceName)
 	}
 }

@@ -1,3 +1,7 @@
+/*
+Package DHCP handles the DHCP protocol. I'm just using an open source variant, but wrapping it in my own library,
+so I can fork/change/swap libraries if i need to.
+*/
 package dhcp
 
 import (
@@ -92,7 +96,8 @@ func (h *DHCPHandler) ServeDHCP(p dhcp.Packet, msgType dhcp.MessageType, options
 	switch msgType {
 
 	case dhcp.Discover:
-		free, nic := -1, p.CHAddr().String()
+		var free int
+		nic := p.CHAddr().String()
 		for i, v := range h.leases { // Find previous lease
 			if v.nic == nic {
 				free = i

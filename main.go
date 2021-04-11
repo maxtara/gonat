@@ -1,3 +1,6 @@
+/*
+Main package for the program.
+*/
 package main
 
 import (

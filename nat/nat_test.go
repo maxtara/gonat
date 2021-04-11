@@ -444,7 +444,7 @@ func CreatePacketIPTCP(t require.TestingT, src, dst net.IP, srcport, dstport uin
 		CWR:     flgas.CWR,
 		NS:      flgas.NS,
 	}
-	tcpLayer.SetNetworkLayerForChecksum(ipLayer)
+	_ = tcpLayer.SetNetworkLayerForChecksum(ipLayer)
 	// And create the packet with the layers
 	buffer := gopacket.NewSerializeBuffer()
 	err := gopacket.SerializeLayers(buffer, common.Options,
