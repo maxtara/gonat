@@ -1,0 +1,15 @@
+lan:
+  - name: eth2
+    addr: fe80::cafe:1/64
+    dhcp: 
+      enabled: false
+wan:
+  name: eth1
+  addr: 192.168.1.80/24
+portForwardingRules:
+  - name: testing
+    internalPortStart: 3000 # end is implied
+    externalPortStart: 2000
+    externalPortEnd: 2010
+    protocol: tcp
+    internalIP: 172.15.2.10

@@ -37,7 +37,7 @@ type testCallback struct {
 	ifno int
 }
 
-func (n testCallback) Send(pkt Packet) (err error) {
+func (n testCallback) Send(pkt *Packet) (err error) {
 	lock.Lock()
 	defer lock.Unlock()
 	require.Nil(globalTestHolder, globalPacketHolder[n.ifno])
@@ -103,7 +103,8 @@ func TestNAT(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		pkt.FromInterface = &fromInterface
-		err := n.natPacket(pkt, ipv4, eth)
+		pkt.Ip4 = ipv4
+		err := n.natPacket(&pkt, eth)
 		require.Nil(t, err)
 		require.NotNil(t, globalPacketHolder[1])
 		require.Nil(t, globalPacketHolder[0])

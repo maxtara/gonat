@@ -3,8 +3,6 @@ package nat
 import (
 	"gonat/dhcp"
 	"net"
-
-	"github.com/google/gopacket"
 )
 
 type Interface struct {
@@ -37,12 +35,6 @@ type Source interface {
 
 // Dest - a Destination of packets. Interface to make it easier to test with.
 type Dest interface {
-	Send(Packet) (err error)
+	Send(*Packet) (err error)
 	SendBytes([]byte) (err error)
-}
-
-type Packet struct {
-	gopacket.Packet
-	ThreadNo      int // Thread number, starting from 1. The first is dedicated for ARP entries, as they are done asyncronously
-	FromInterface *Interface
 }

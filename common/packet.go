@@ -38,7 +38,15 @@ func ConvertPacketRuse(pkt gopacket.Packet, buf *gopacket.SerializeBuffer) []byt
 	return (*buf).Bytes()
 }
 
-func GetIP(flow gopacket.NetworkLayer) (net.IP, net.IP) {
+func GetIPs(flow gopacket.NetworkLayer) (net.IP, net.IP) {
 	f := flow.NetworkFlow()
 	return net.IP(f.Src().Raw()), net.IP(f.Dst().Raw())
+}
+func GetSrcIP(flow gopacket.NetworkLayer) net.IP {
+	f := flow.NetworkFlow()
+	return net.IP(f.Src().Raw())
+}
+func GetDstIP(flow gopacket.NetworkLayer) net.IP {
+	f := flow.NetworkFlow()
+	return net.IP(f.Dst().Raw())
 }

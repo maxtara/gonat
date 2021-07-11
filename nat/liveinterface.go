@@ -170,6 +170,9 @@ func (s Sniffer) Start5(nat *Nat, bpf string) {
 	runAsync := func(i int) {
 		for {
 			data, _, _ := handle.ReadPacketData()
+			if len(data) == 0 {
+				continue
+			}
 			pkt := gopacket.NewPacket(data, lt, opts)
 			nat.AcceptPkt(Packet{Packet: pkt, ThreadNo: i + 1}, s.ifName)
 		}
@@ -202,7 +205,7 @@ func CreateSpitter(ifName string, promisc bool) Dest {
 	return s
 }
 
-func (s Spitter) Send(pkt Packet) (err error) {
+func (s Spitter) Send(pkt *Packet) (err error) {
 	buf := common.ConvertPacketRuse(pkt, &s.bufs[pkt.ThreadNo])
 	err = s.handle.WritePacketData(buf)
 	if err != nil {
