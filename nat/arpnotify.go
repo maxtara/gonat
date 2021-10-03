@@ -1,6 +1,7 @@
 package nat
 
 import (
+	"bytes"
 	"net"
 	"sync"
 	"time"
@@ -8,7 +9,7 @@ import (
 	"github.com/rs/zerolog/log"
 )
 
-// This file handles ARP responses.
+// This file handles ARP responses. NEW: Should be any HW-IP mapping (ipv6 NS/NA) - but this code still has "arp" through it. TODO: Remove "arp"
 // The issue we have is N number of threads can all perform ARP requests
 // And the response will always come from another random thread.
 // So, we're going to have a single thread that recieves a notification that a ARP response has been received.
@@ -16,7 +17,6 @@ import (
 // If it is, we'll send a signal to that thread to wake it up.
 // If it's not, we'll ignore it.
 // The main thing to note is that we're using a single thread to handle all of the ARP responses.
-
 type ArpEntry struct {
 	Mac       net.HardwareAddr
 	IntName   string
@@ -34,6 +34,11 @@ type ARPNotify struct {
 }
 
 func (a *ARPNotify) AddArpEntry(ip net.IP, mac net.HardwareAddr, interfaceName string) {
+
+	// If its a zero mac, then we don't want to add it - we're just looking for a response
+	if bytes.Equal(mac, zeroHWAddr) {
+		return
+	}
 	a.arpTable.Store(ip.String(), ArpEntry{Mac: mac, IntName: interfaceName, TimeAdded: time.Now()})
 	a.arpChan <- ip
 }
@@ -79,8 +84,7 @@ func (a *ARPNotify) Init() {
 	}()
 }
 
-// WaitForArp - if there is an entry in the arp table, return immediately.
-
+// WaitForArp waits if there is an entry in the arp table, then/or return immediately
 func (a *ARPNotify) WaitForArp(ipNet net.IP) (mac ArpEntry, ok bool) {
 
 	mac, ok = a.GetArpEntry(ipNet)

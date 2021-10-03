@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"strings"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -103,4 +104,10 @@ func String2IPProto(str string) (layers.IPProtocol, error) {
 	default:
 		return 0, errors.New("unknown protocol")
 	}
+}
+
+// IsIPv4 returns true if the address is an ipv4 address.
+// I wish this was nicer in golang, but it seems both 'ip.to4() == nil' and 'len(ip) == 16' dont always work
+func IsIPv4(ip net.IP) bool {
+	return strings.Count(ip.String(), ":") < 2
 }

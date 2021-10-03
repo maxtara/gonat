@@ -10,3 +10,5 @@ require (
 	golang.org/x/net v0.0.0-20201021035429-f5854403a974
 	gopkg.in/yaml.v3 v3.0.0-20210107192922-496545a6307b
 )
+
+// replace github.com/google/gopacket v1.1.19 => github.com/maxtara/gopacket v1.1.19

@@ -106,7 +106,7 @@ func (n *Nat) AcceptPkt4(pkt *Packet) {
 		if ipdst.Equal(pkt.FromInterface.IPv4Addr) {
 			// Make sure its a request to
 			if icmp.TypeCode.Type() == layers.ICMPv4TypeEchoRequest {
-				if err := sendICMPEchoResponse(icmp, pkt); err != nil {
+				if err := sendICMPv4EchoResponse(icmp, pkt); err != nil {
 					log.Error().Err(err).Msgf("failed to send packet %s", err)
 				}
 				return // Sent packet or error'd. Dont NAT, return.
@@ -148,14 +148,15 @@ func (n *Nat) AcceptPkt4(pkt *Packet) {
 			}
 		}
 	}
-
-	// Probably a NAT'able packet from here on
-	// Drop the TTL. This will mean anything onwards should have the TTL down.
-	ipv4.TTL -= 1
-	if err := n.natPacket(pkt, pkt.Eth); err != nil {
-		log.Error().Err(err).Msgf("failed to NAT packet %s", pkt)
+	// If the default gateway is ipv4, then we can NAT
+	if common.IsIPv4(n.defaultGateway.IPv4Addr) {
+		// Probably a NAT'able packet from here on
+		// Drop the TTL. This will mean anything onwards should have the TTL down.
+		ipv4.TTL -= 1
+		if err := n.natPacket(pkt, pkt.Eth); err != nil {
+			log.Error().Err(err).Msgf("failed to NAT packet %s", pkt)
+		}
 	}
-	return
 }
 
 // handleOtherICMP - Handles an ICMP message. Mostly REQ-4 on rfc5508
@@ -167,7 +168,7 @@ func (n *Nat) handleOtherICMP(icmp *layers.ICMPv4, pkt *Packet) (err error) {
 
 	payload := icmp.Payload
 	outpkt := gopacket.NewPacket(payload, layers.LayerTypeIPv4, gopacket.Default)
-	log.Debug().Msgf("=====================================Input pkts ------ =====================================\n%v\n%v", pkt, outpkt)
+	log.Debug().Interface("InputPacket", pkt).Interface("outpkt", outpkt).Msgf("Handing Other ICMP")
 
 	if outpkt == nil {
 		return ErrICMPFailure
@@ -228,7 +229,8 @@ func (n *Nat) handleOtherICMP(icmp *layers.ICMPv4, pkt *Packet) (err error) {
 		return
 	}
 
-	log.Debug().Msgf("=====================================output pkts for %s ------ =====================================\n%v\n%v", natkey, pkt, outpkt)
+	log.Debug().Interface("InputPacket", pkt).Interface("outpkt", outpkt).Interface("natkey", natkey).Msgf("Handing Other ICMP (end)")
+
 	if err = toInterface.Callback.SendBytes(buffer.Bytes()); err != nil {
 		log.Error().Err(err).Msgf("failed to send packet %s", err)
 	}
@@ -243,19 +245,19 @@ func sendICMPPacketReverse(pkt *Packet, icmpType, icmpCode uint8) error {
 	return pkt.FromInterface.Callback.SendBytes(buf)
 }
 
-func sendICMPEchoResponse(icmp *layers.ICMPv4, pkt *Packet) (err error) {
-	// Flip the packet around, and send it pack. Shortcut to generating an ICMP packet.
-	oldEth := pkt.Ip4.DstIP
-	pkt.Ip4.DstIP = pkt.Ip4.SrcIP
+func sendICMPv4EchoResponse(icmp *layers.ICMPv4, pkt *Packet) (err error) {
 	// Drop the TTL. This will mean anything onwards should have the TTL down.
 	pkt.Ip4.TTL -= 1
+	// Flip the packet around, and send it pack. Shortcut to generating an ICMP packet.
+	oldDstIp := pkt.Ip4.DstIP
+	pkt.Ip4.DstIP = pkt.Ip4.SrcIP
+	pkt.Ip4.SrcIP = oldDstIp
 
-	pkt.Ip4.SrcIP = oldEth
-	icmp.TypeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, layers.ICMPv4CodeNet)
-
-	oldIP := pkt.Eth.DstMAC
+	oldDstMac := pkt.Eth.DstMAC
 	pkt.Eth.DstMAC = pkt.Eth.SrcMAC
-	pkt.Eth.SrcMAC = oldIP
+	pkt.Eth.SrcMAC = oldDstMac
+
+	icmp.TypeCode = layers.CreateICMPv4TypeCode(layers.ICMPv4TypeEchoReply, layers.ICMPv4CodeNet)
 
 	return pkt.FromInterface.Callback.Send(pkt)
 
@@ -311,13 +313,6 @@ func sendARPResponse(arp *layers.ARP, pkt *Packet) (err error) {
 	return
 }
 
-func (n *Nat) updateArpTable(mac net.HardwareAddr, ip net.IP, interfaceName string) {
-
-	// If mac is not 0:0:0:0:0:0, then update ARP table.
-	if !bytes.Equal(mac, zeroHWAddr) {
-		n.arpNotify.AddArpEntry(ip, mac, interfaceName)
-	}
-}
 func (n *Nat) doArp(dst net.IP, intf *Interface) (err error) {
 	log.Info().Msgf("Doing an ARP request for %s from %s", dst, intf.IfName)
 	// Send ARP request
@@ -378,7 +373,8 @@ func (n *Nat) getEthAddr(ip net.IP) (ArpEntry, error) {
 		// Wait for either the ARP response, or a timeout.
 		mac, ok := n.arpNotify.WaitForArp(ip)
 		if !ok {
-			return EmptyArpEntry, fmt.Errorf("ARP entry not there, even after waiting. Bad news ")
+			return EmptyArpEntry, fmt.Errorf("ARP entry not there, even after waiting. Bad news")
+
 		}
 		log.Info().Msgf("Got ARP entry for %s - %s after waiting", ip, mac)
 		return mac, nil

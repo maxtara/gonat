@@ -119,8 +119,9 @@ func (n *Nat) AcceptPkt(pkt Packet, ifName string) {
 		} else {
 			// Else, some other ARP message. Lets just update the ARP table from the messages regardless of who its for. No possible poising issue here. updateArpTable checks for zero byte macs
 			log.Debug().Msgf("ARP message seen. Updating table. %v:%v, %v:%v", arp.SourceHwAddress, arp.SourceProtAddress, arp.DstHwAddress, arp.DstProtAddress)
-			n.updateArpTable(arp.SourceHwAddress, arp.SourceProtAddress, pkt.FromInterface.IfName)
-			n.updateArpTable(arp.DstHwAddress, arp.DstProtAddress, pkt.FromInterface.IfName)
+			n.arpNotify.AddArpEntry(arp.SourceProtAddress, arp.SourceHwAddress, pkt.FromInterface.IfName)
+			n.arpNotify.AddArpEntry(arp.DstProtAddress, arp.DstHwAddress, pkt.FromInterface.IfName)
+
 		}
 	} else {
 		log.Info().Msgf("Some other pkt type - %d. Currently unsupported - %s", pkt.Eth.EthernetType, pkt)
@@ -150,33 +151,13 @@ func (n *Nat) routeInternally(pkt *Packet) (err error) {
 // natPacket - handles a packet that is destined for a NAT entry
 // The NAT code is kept seperate here, so conversion to ipv6+ipv4 can be neater. I'll need to make a new interface to gopacket.Packet first.
 func (n *Nat) natPacket(pkt *Packet, eth *layers.Ethernet) (err error) {
-	var srcport, dstport uint16
-	var tcp *layers.TCP
-	var udp *layers.UDP
-	var icmp *layers.ICMPv4
 	var toInterface *Interface
+	// Update internal layer4 state of packet
+	pkt.SetLayer4()
+	srcport, dstport := pkt.Ports()
 	originalSourceIP, originalDstIp := pkt.IPs()
 	protocol := pkt.Protocol()
 
-	if protocol == layers.IPProtocolTCP {
-		tcp, _ = pkt.Layer(layers.LayerTypeTCP).(*layers.TCP)
-		srcport = uint16(tcp.SrcPort)
-		dstport = uint16(tcp.DstPort)
-		_ = tcp.SetNetworkLayerForChecksum(pkt.NetworkLayer())
-	} else if protocol == layers.IPProtocolUDP {
-		udp, _ = pkt.Layer(layers.LayerTypeUDP).(*layers.UDP)
-		srcport = uint16(udp.SrcPort)
-		dstport = uint16(udp.DstPort)
-		_ = udp.SetNetworkLayerForChecksum(pkt.NetworkLayer())
-	} else if protocol == layers.IPProtocolICMPv4 {
-		icmp, _ = pkt.Layer(layers.LayerTypeICMPv4).(*layers.ICMPv4)
-		srcport = uint16(icmp.Id)
-		dstport = uint16(icmp.Id)
-	} else if protocol == layers.IPProtocolIGMP {
-		log.Debug().Msgf("Trying to NAT IGMP. Going to pass this through, TODO - investigate")
-	} else {
-		log.Warn().Msgf("Trying to NAT unsupported protocol. You better hope a layer 2/3 NAT works. - %s", pkt)
-	}
 	log.Debug().Msgf("Input packet - %s==(%s:%d->%s:%d)", pkt.FromInterface.IfName, originalSourceIP, srcport, originalDstIp, dstport)
 	// Unique Tuple for this packet
 	natkey := NatKey{SrcPort: srcport, DstPort: dstport, SrcIP: originalSourceIP.String(), DstIP: originalDstIp.String(), Protocol: protocol}
@@ -189,18 +170,10 @@ func (n *Nat) natPacket(pkt *Packet, eth *layers.Ethernet) (err error) {
 		pkt.SetIPs(forwardEntry.SrcIP, forwardEntry.DstIP)
 		toInterface = forwardEntry.Inf
 		eth.DstMAC = forwardEntry.DstMac
-		if tcp != nil {
-			tcp.SrcPort = layers.TCPPort(forwardEntry.SrcPort)
-			tcp.DstPort = layers.TCPPort(forwardEntry.DstPort)
-		} else if udp != nil {
-			udp.SrcPort = layers.UDPPort(forwardEntry.SrcPort)
-			udp.DstPort = layers.UDPPort(forwardEntry.DstPort)
-		} else if icmp != nil {
-			icmp.Id = uint16(forwardEntry.SrcPort)
-		}
+		pkt.SetPorts(forwardEntry.SrcPort, forwardEntry.DstPort)
 	} else {
 		// Not natted previously - find a new NAT if
-		// 1. we're on a NAT enabled port
+		// 1. we're on a NAT enabled port, or
 		// 2. the dst port is in the port forward table.
 
 		// If its addresssed to me (non WAN interface), then its probably DNS.
@@ -217,7 +190,7 @@ func (n *Nat) natPacket(pkt *Packet, eth *layers.Ethernet) (err error) {
 
 			// Hairpin
 			if pkt.FromInterface.NatEnabled && n.defaultGateway.IPv4Addr.Equal(originalDstIp) {
-				pkt.SetSrcIP(n.defaultGateway.IPv4Addr)
+				pkt.SetIPs(n.defaultGateway.IPv4Addr, originalDstIp)
 			}
 
 			// Unseen packet on the non nat interface.
@@ -226,11 +199,11 @@ func (n *Nat) natPacket(pkt *Packet, eth *layers.Ethernet) (err error) {
 			entry, ok := n.portForwardingTable[pfkey]
 			if !ok {
 				str := common.LogSimpleNDPI(pkt, pkt.SrcIP(), originalDstIp, srcport, dstport, protocol)
-				log.Warn().Msgf("Dropping pkt %s. Not in forwarding table", str)
+				log.Debug().Msgf("Dropping pkt %s. Not in forwarding table", str)
 				return
 			}
 			log.Info().Msgf("New packet matches port forwarding rule: %+v  ---- %+v", pfkey, entry)
-			pkt.SetDstIP(entry.InternalIP)
+			pkt.SetIPs(pkt.SrcIP(), entry.InternalIP)
 			tmp, errTmp := n.getEthAddr(entry.InternalIP)
 			if errTmp != nil {
 				log.Error().Err(err).Msgf("Failed to get MAC address for %s", entry.InternalIP)
@@ -242,19 +215,15 @@ func (n *Nat) natPacket(pkt *Packet, eth *layers.Ethernet) (err error) {
 			expectedDstIP = pkt.SrcIP()
 			dstport = entry.InternalPort
 
-			if protocol == layers.IPProtocolTCP {
-				tcp.DstPort = layers.TCPPort(entry.InternalPort)
-			} else if protocol == layers.IPProtocolUDP {
-				udp.DstPort = layers.UDPPort(entry.InternalPort)
-			}
+			pkt.SetDstPort(entry.InternalPort)
 
 		} else {
-			pkt.SetSrcIP(n.defaultGateway.IPv4Addr)
+			pkt.SetIPs(n.defaultGateway.IPv4Addr, originalDstIp)
 			toInterface = &n.defaultGateway
 			expectedDstIP = toInterface.IPv4Addr
 			tmp, errTmp := n.getEthAddr(toInterface.IPv4Gateway)
 			if errTmp != nil {
-				log.Error().Err(err).Msgf("Failed to get MAC address for %s", toInterface.IPv4Gateway)
+				log.Error().Err(errTmp).Msgf("Failed to get MAC address for gateway %s ", toInterface.IPv4Gateway)
 				return
 			}
 			eth.DstMAC = tmp.Mac
@@ -269,13 +238,7 @@ func (n *Nat) natPacket(pkt *Packet, eth *layers.Ethernet) (err error) {
 		reverseKey := n.chooseSrcPort(dstport, srcport, &tmpDstIP, &expectedDstIP, &protocol, reverseEntry, 0)
 
 		srcport = reverseKey.DstPort
-		if tcp != nil {
-			tcp.SrcPort = layers.TCPPort(srcport)
-		} else if udp != nil {
-			udp.SrcPort = layers.UDPPort(srcport)
-		} else if icmp != nil {
-			icmp.Id = uint16(srcport)
-		}
+		pkt.SetSrcPort(srcport)
 		// Create new forward entries. hold a reference to a key of the reverse direction.
 		forwardEntry = &NatEntry{SrcPort: srcport, SrcIP: pkt.SrcIP(), Inf: toInterface, DstPort: dstport, DstIP: pkt.DstIP(), DstMac: eth.DstMAC, ReverseKey: reverseKey}
 		log.Debug().Msgf("New NAT (forward) for %s - %s", pkt.FromInterface.IfName, natkey)
@@ -295,8 +258,8 @@ func (n *Nat) natPacket(pkt *Packet, eth *layers.Ethernet) (err error) {
 	}
 
 	// Consider TCP flags. This doesnt need to be done above, as only a SYN can create a reverse NAT entry.
-	if tcp != nil {
-		n.trackTCPSimple(forwardEntry, tcp)
+	if pkt.Tcp != nil {
+		n.trackTCPSimple(forwardEntry, pkt.Tcp)
 	}
 	// Update NAT table for sent packet - so next packet can use the same tuple.
 	n.table.Store(natkey, forwardEntry)
