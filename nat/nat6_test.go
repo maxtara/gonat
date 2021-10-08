@@ -29,7 +29,8 @@ var (
 )
 
 func TestNAT6(t *testing.T) {
-	globalTestHolder = t
+	globalPacketHolder := &[3]gopacket.Packet{}
+
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(zerolog.DebugLevel)
 	pkt := CreatePacket6IPTCP(t, client1IP6, googleIP6, 2222, 443, common.TCPFlags{SYN: true})
 	IPv6, _ := pkt.Layer(layers.LayerTypeIPv6).(*layers.IPv6)
@@ -44,7 +45,7 @@ func TestNAT6(t *testing.T) {
 		// IPv6Gateway: lan1gateway6, // not used in this ipset
 		NatEnabled: true,
 		MTU:        65535,
-		Callback:   testCallback{ifno: 0},
+		Callback:   &testCallback{ifno: 0, globalPacketHolder: globalPacketHolder, globalTestHolder: t},
 	}
 	gwSet := Interface{
 		IfName:      "eth0",
@@ -55,7 +56,7 @@ func TestNAT6(t *testing.T) {
 		IPv4Gateway: wangw6,
 		NatEnabled:  false,
 		MTU:         65535,
-		Callback:    testCallback{ifno: 1},
+		Callback:    &testCallback{ifno: 1, globalPacketHolder: globalPacketHolder, globalTestHolder: t},
 	}
 	fromInterfaceAlternative := Interface{
 		IfName:      "eth2",
@@ -65,7 +66,7 @@ func TestNAT6(t *testing.T) {
 		IPv4Network: net.IPNet{IP: lan2gateway6, Mask: lan1gateway6Mask},
 		// IPv6Gateway: lan2gateway6, // not used in this ipset
 		NatEnabled: true,
-		Callback:   testCallback{ifno: 2},
+		Callback:   &testCallback{ifno: 2, globalPacketHolder: globalPacketHolder, globalTestHolder: t},
 		MTU:        65535,
 	}
 
@@ -94,11 +95,11 @@ func TestNAT6(t *testing.T) {
 	require.Nil(t, globalPacketHolder[0])
 	t.Logf("Adding hw entry for %s", wangw6)
 	n.arpNotify.AddArpEntry(wangw6, h1w, "eth0")
-	// wg.Wait()
+	wg.Wait()
 
 	t.Log("############### TEST 2. Testing standard TCP three way handshake #################")
 	n.table.DeleteAll()
-	testThreeWayHandShakeWithPort6(t, n, uint16(2000), uint16(2000))
+	testThreeWayHandShakeWithPort6(t, n, uint16(2000), uint16(2000), globalPacketHolder)
 
 	t.Log("############### TEST 3 - PING #################")
 	pkt = CreateICMPPacketTest6(t, client1IP6, googleIP6, layers.ICMPv6TypeEchoRequest, 0)
@@ -216,7 +217,7 @@ func TestNAT6(t *testing.T) {
 		ReverseKey: &NatKey{},
 		TcpState:   TCPCloseState{},
 	}
-	testThreeWayHandShakeWithPort6(t, n, uint16(2000), uint16(2002))
+	testThreeWayHandShakeWithPort6(t, n, uint16(2000), uint16(2002), globalPacketHolder)
 	t.Log("############### TEST 6. Testing standard three way handshake with an allocated port, in the 1024 boundy. #################")
 	n.table.DeleteAll()
 	n.table.table[NatKey{
@@ -236,7 +237,7 @@ func TestNAT6(t *testing.T) {
 		ReverseKey: &NatKey{},
 		TcpState:   TCPCloseState{},
 	}
-	testThreeWayHandShakeWithPort6(t, n, uint16(1023), uint16(7))
+	testThreeWayHandShakeWithPort6(t, n, uint16(1023), uint16(7), globalPacketHolder)
 	t.Log("############### TEST 7. Testing standard three way handshake with an allocated port, in the 65535 boundy. #################")
 	n.table.DeleteAll()
 	n.table.table[NatKey{
@@ -256,7 +257,7 @@ func TestNAT6(t *testing.T) {
 		ReverseKey: &NatKey{},
 		TcpState:   TCPCloseState{},
 	}
-	testThreeWayHandShakeWithPort6(t, n, uint16(65535), uint16(1027))
+	testThreeWayHandShakeWithPort6(t, n, uint16(65535), uint16(1027), globalPacketHolder)
 	t.Log("############### TEST 8. Hairpin TCP. Same interface #################")
 	n.table.DeleteAll()
 	n.portForwardingTable[PortForwardingKey{ExternalPort: 5555, Protocol: layers.IPProtocolTCP}] = PortForwardingEntry{InternalIP: client1IP6, InternalPort: 4444}
@@ -317,7 +318,7 @@ func TestNAT6(t *testing.T) {
 
 }
 
-func testThreeWayHandShakeWithPort6(t *testing.T, n *Nat, srcport, expectedSrcPort uint16) {
+func testThreeWayHandShakeWithPort6(t *testing.T, n *Nat, srcport, expectedSrcPort uint16, globalPacketHolder *[3]gopacket.Packet) {
 	t.Log("############### SYN #################")
 	pkt := CreatePacket6IPTCP(t, client1IP6, googleIP6, srcport, 443, common.TCPFlags{SYN: true})
 	globalPacketHolder[0] = nil

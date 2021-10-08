@@ -130,7 +130,13 @@ func (n *Nattable) Get(key NatKey) *NatEntry {
 
 func (n *Nattable) DeleteAll() {
 	// Test function and not used in main code, so a shortcut here.
-	n.table = make(map[NatKey]*NatEntry)
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	// n.table = make(map[NatKey]*NatEntry)
+	for nk := range n.table {
+		delete(n.table, nk)
+	}
+
 }
 
 func (k NatKey) Reverse() NatKey {

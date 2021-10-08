@@ -279,8 +279,8 @@ func (n *Nat) chooseSrcPort(p1, selectPort uint16, i1, i2 *net.IP, prot *layers.
 	// Entry not in table, safe to create then return
 	if !ok {
 		n.table.table[*tryKey] = entry
+		log.Debug().Msgf("New NAT (reverse) for %s - %v", entry.Inf.IfName, tryKey)
 		n.table.lock.Unlock()
-		log.Debug().Msgf("New NAT (reverse) for %s - %s", entry.Inf.IfName, tryKey)
 
 		return
 	}

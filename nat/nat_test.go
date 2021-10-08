@@ -17,44 +17,44 @@ import (
 )
 
 var (
-	h1w, _             = net.ParseMAC("00:15:5d:67:be:9a")
-	h2w, _             = net.ParseMAC("00:15:5d:67:be:9b")
-	h3w, _             = net.ParseMAC("00:15:5d:67:be:9c")
-	lan1gateway        = net.ParseIP("10.0.0.1")
-	lan2gateway        = net.ParseIP("192.168.1.1")
-	client1IP          = net.ParseIP("10.0.0.2")
-	client2IP          = net.ParseIP("192.168.1.2")
-	googleIP           = net.ParseIP("8.8.8.8")
-	wangw              = net.ParseIP("172.31.45.1")
-	wanclient          = net.ParseIP("172.20.112.88")
-	rawBytes           = []byte{0, 1, 2, 3, 4}
-	globalPacketHolder [3]gopacket.Packet
-	lock               sync.RWMutex
-	globalTestHolder   *testing.T
+	h1w, _      = net.ParseMAC("00:15:5d:67:be:9a")
+	h2w, _      = net.ParseMAC("00:15:5d:67:be:9b")
+	h3w, _      = net.ParseMAC("00:15:5d:67:be:9c")
+	lan1gateway = net.ParseIP("10.0.0.1")
+	lan2gateway = net.ParseIP("192.168.1.1")
+	client1IP   = net.ParseIP("10.0.0.2")
+	client2IP   = net.ParseIP("192.168.1.2")
+	googleIP    = net.ParseIP("8.8.8.8")
+	wangw       = net.ParseIP("172.31.45.1")
+	wanclient   = net.ParseIP("172.20.112.88")
+	rawBytes    = []byte{0, 1, 2, 3, 4}
 )
 
 type testCallback struct {
-	ifno int
+	ifno               int
+	globalPacketHolder *[3]gopacket.Packet
+	lock               sync.RWMutex
+	globalTestHolder   *testing.T
 }
 
-func (n testCallback) Send(pkt *Packet) (err error) {
-	lock.Lock()
-	defer lock.Unlock()
-	require.Nil(globalTestHolder, globalPacketHolder[n.ifno])
-	globalPacketHolder[n.ifno] = pkt
+func (n *testCallback) Send(pkt *Packet) (err error) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	require.Nil(n.globalTestHolder, n.globalPacketHolder[n.ifno])
+	n.globalPacketHolder[n.ifno] = pkt
 	return
 }
-func (n testCallback) SendBytes(buf []byte) (err error) {
-	lock.Lock()
-	defer lock.Unlock()
-	require.Nil(globalTestHolder, globalPacketHolder[n.ifno])
+func (n *testCallback) SendBytes(buf []byte) (err error) {
+	n.lock.Lock()
+	defer n.lock.Unlock()
+	require.Nil(n.globalTestHolder, n.globalPacketHolder[n.ifno])
 	pkt := gopacket.NewPacket(buf, layers.LayerTypeEthernet, gopacket.Default)
-	globalPacketHolder[n.ifno] = pkt
+	n.globalPacketHolder[n.ifno] = pkt
 	return
 }
 
 func TestNAT(t *testing.T) {
-	globalTestHolder = t
+	globalPacketHolder := &[3]gopacket.Packet{}
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr}).Level(zerolog.DebugLevel)
 	pkt := CreatePacketIPTCP(t, client1IP, googleIP, 2222, 443, common.TCPFlags{SYN: true})
 	ipv4, _ := pkt.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
@@ -68,7 +68,7 @@ func TestNAT(t *testing.T) {
 		IPv4Network: net.IPNet{IP: lan1gateway, Mask: net.CIDRMask(8, 32)},
 		// IPv4Gateway: lan1gateway, // not used in this ipset
 		NatEnabled: true,
-		Callback:   testCallback{ifno: 0},
+		Callback:   &testCallback{ifno: 0, globalPacketHolder: globalPacketHolder, globalTestHolder: t},
 	}
 	gwSet := Interface{
 		IfName:      "eth0",
@@ -79,7 +79,7 @@ func TestNAT(t *testing.T) {
 		IPv4Gateway: wangw,
 		NatEnabled:  false,
 
-		Callback: testCallback{ifno: 1},
+		Callback: &testCallback{ifno: 1, globalPacketHolder: globalPacketHolder, globalTestHolder: t},
 	}
 	fromInterfaceAlternative := Interface{
 		IfName:      "eth2",
@@ -89,7 +89,7 @@ func TestNAT(t *testing.T) {
 		IPv4Network: net.IPNet{IP: lan2gateway, Mask: net.CIDRMask(8, 32)},
 		// IPv4Gateway: lan2gateway, // not used in this ipset
 		NatEnabled: true,
-		Callback:   testCallback{ifno: 2},
+		Callback:   &testCallback{ifno: 2, globalPacketHolder: globalPacketHolder, globalTestHolder: t},
 	}
 
 	n := CreateNat(gwSet, []Interface{fromInterface, fromInterfaceAlternative}, []PFRule{})
@@ -121,7 +121,7 @@ func TestNAT(t *testing.T) {
 
 	t.Log("############### TEST 2. Testing standard TCP three way handshake #################")
 	n.table.DeleteAll()
-	testThreeWayHandShakeWithPort(t, n, uint16(2000), uint16(2000))
+	testThreeWayHandShakeWithPort(t, n, uint16(2000), uint16(2000), globalPacketHolder)
 
 	t.Log("############### TEST 3 - PING #################")
 	pkt = CreateICMPPacketTest(t, client1IP, googleIP, layers.ICMPv4TypeEchoRequest, 0)
@@ -136,7 +136,7 @@ func TestNAT(t *testing.T) {
 	require.Equal(t, dstipout.To4(), googleIP.To4())
 
 	// Create the reverse packet
-	t.Log("############### TEST 3. PING return #################")
+	t.Log("############### TEST 3. PING return #################", globalPacketHolder)
 	pkt = CreateICMPPacketTest(t, googleIP, wanclient, layers.ICMPv4TypeEchoReply, 1)
 	globalPacketHolder[0] = nil
 	globalPacketHolder[1] = nil
@@ -239,7 +239,7 @@ func TestNAT(t *testing.T) {
 		ReverseKey: &NatKey{},
 		TcpState:   TCPCloseState{},
 	}
-	testThreeWayHandShakeWithPort(t, n, uint16(2000), uint16(2002))
+	testThreeWayHandShakeWithPort(t, n, uint16(2000), uint16(2002), globalPacketHolder)
 	t.Log("############### TEST 6. Testing standard three way handshake with an allocated port, in the 1024 boundy. #################")
 	n.table.DeleteAll()
 	n.table.table[NatKey{
@@ -259,7 +259,7 @@ func TestNAT(t *testing.T) {
 		ReverseKey: &NatKey{},
 		TcpState:   TCPCloseState{},
 	}
-	testThreeWayHandShakeWithPort(t, n, uint16(1023), uint16(7))
+	testThreeWayHandShakeWithPort(t, n, uint16(1023), uint16(7), globalPacketHolder)
 	t.Log("############### TEST 7. Testing standard three way handshake with an allocated port, in the 65535 boundy. #################")
 	n.table.DeleteAll()
 	n.table.table[NatKey{
@@ -279,7 +279,7 @@ func TestNAT(t *testing.T) {
 		ReverseKey: &NatKey{},
 		TcpState:   TCPCloseState{},
 	}
-	testThreeWayHandShakeWithPort(t, n, uint16(65535), uint16(1027))
+	testThreeWayHandShakeWithPort(t, n, uint16(65535), uint16(1027), globalPacketHolder)
 	t.Log("############### TEST 8. Hairpin TCP. Same interface #################")
 	n.table.DeleteAll()
 	n.portForwardingTable[PortForwardingKey{ExternalPort: 5555, Protocol: layers.IPProtocolTCP}] = PortForwardingEntry{InternalIP: client1IP, InternalPort: 4444}
@@ -340,7 +340,7 @@ func TestNAT(t *testing.T) {
 
 }
 
-func testThreeWayHandShakeWithPort(t *testing.T, n *Nat, srcport, expectedSrcPort uint16) {
+func testThreeWayHandShakeWithPort(t *testing.T, n *Nat, srcport, expectedSrcPort uint16, globalPacketHolder *[3]gopacket.Packet) {
 	t.Log("############### SYN #################")
 	pkt := CreatePacketIPTCP(t, client1IP, googleIP, srcport, 443, common.TCPFlags{SYN: true})
 	globalPacketHolder[0] = nil
