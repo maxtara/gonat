@@ -133,6 +133,8 @@ func (n *Nat) AcceptPkt4(pkt *Packet) {
 
 		}
 	}
+	// Drop the TTL. This will mean anything onwards should have the TTL down.
+	ipv4.TTL -= 1
 
 	// Check if its from AND to a LAN interface
 	// Im assuming its faster to just loop over internalRoutes, instead of implementing a ipnetwork tree object, as
@@ -151,8 +153,6 @@ func (n *Nat) AcceptPkt4(pkt *Packet) {
 	// If the default gateway is ipv4, then we can NAT
 	if common.IsIPv4(n.defaultGateway.IPv4Addr) {
 		// Probably a NAT'able packet from here on
-		// Drop the TTL. This will mean anything onwards should have the TTL down.
-		ipv4.TTL -= 1
 		if err := n.natPacket(pkt, pkt.Eth); err != nil {
 			log.Error().Err(err).Msgf("failed to NAT packet %s", pkt)
 		}
@@ -349,36 +349,4 @@ func (n *Nat) doArp(dst net.IP, intf *Interface) (err error) {
 		return
 	}
 	return
-}
-
-// getEthAddr - get the Ethernet address of the ip
-// 1. Check the ARP table
-// 2. If not found, send ARP request on all interfaces that contains the ip
-// 3. Then wait for ARP reply
-func (n *Nat) getEthAddr(ip net.IP) (ArpEntry, error) {
-
-	mac, ok := n.arpNotify.GetArpEntry(ip)
-	if !ok {
-		log.Warn().Msgf("failed to find gateway ARP entry for %s. Waiting", ip)
-
-		for _, intVal := range n.interfaces {
-			// log.Debug().Msgf("Checking %+v for %s. Waiting", intVal, ip)
-			if intVal.IPv4Network.Contains(ip) {
-				if err := n.doArp(ip, &intVal); err != nil {
-					return EmptyArpEntry, err
-				}
-			}
-		}
-
-		// Wait for either the ARP response, or a timeout.
-		mac, ok := n.arpNotify.WaitForArp(ip)
-		if !ok {
-			return EmptyArpEntry, fmt.Errorf("ARP entry not there, even after waiting. Bad news")
-
-		}
-		log.Info().Msgf("Got ARP entry for %s - %s after waiting", ip, mac)
-		return mac, nil
-	}
-
-	return mac, nil
 }

@@ -79,6 +79,36 @@ func CreateICMPPacket(srcmac, dstmac net.HardwareAddr, src, dst net.IP, icmpType
 	return buffer.Bytes(), err
 }
 
+func CreateICMP6Packet(srcmac, dstmac net.HardwareAddr, src, dst net.IP, icmpType, icmpCode uint8) ([]byte, error) {
+
+	ethernetLayer := &layers.Ethernet{
+		SrcMAC:       srcmac,
+		DstMAC:       dstmac,
+		EthernetType: layers.EthernetTypeIPv6,
+	}
+	ipLayer := &layers.IPv6{
+		SrcIP:      src,
+		DstIP:      dst,
+		Version:    6,
+		HopLimit:   64,
+		NextHeader: layers.IPProtocolICMPv6,
+	}
+	icmpLayer := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(icmpType, icmpCode)}
+	_ = icmpLayer.SetNetworkLayerForChecksum(ipLayer)
+	buffer := gopacket.NewSerializeBuffer()
+	err := gopacket.SerializeLayers(buffer, Options,
+		ethernetLayer,
+		ipLayer,
+		icmpLayer,
+		gopacket.Payload([]byte{0}),
+	)
+	if err != nil {
+		log.Error().Err(err).Msg("Error serializing ICMP packet")
+		return nil, err
+	}
+	return buffer.Bytes(), err
+}
+
 func LogSimpleNDPI(pkt gopacket.Packet, src, dst net.IP, srcp, dstp uint16, protocol layers.IPProtocol) (str string) {
 	srvc1 := GetProtoByNumber(int(srcp))
 	srvc2 := GetProtoByNumber(int(dstp))

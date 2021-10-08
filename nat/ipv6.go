@@ -12,8 +12,10 @@ import (
 )
 
 var (
-	_, LinkLocalNet, _ = net.ParseCIDR("fe80::/64")
-	AllRouters         = net.ParseIP("ff02::2")
+	_, LinkLocalNet, _      = net.ParseCIDR("fe80::/64")
+	AllRouters              = net.ParseIP("ff02::2")
+	NSAddress               = net.ParseIP("ff02::1")
+	_, Ipv6ZeroSlashZero, _ = net.ParseCIDR("::/0")
 )
 
 // AcceptPkt6 decides what to do with an ipv6 packet packet.
@@ -78,6 +80,8 @@ func (n *Nat) AcceptPkt6(pkt *Packet) {
 
 	}
 
+	// Drop the TTL. This will mean anything onwards should have the TTL down.
+	pkt.Ip6.HopLimit -= 1
 	// Check if its from AND to a LAN interface
 	// Im assuming its faster to just loop over internalRoutes, instead of implementing a ipnetwork tree object, as
 	// most of the time there will only be one LAN network, at most a few.
@@ -97,11 +101,10 @@ func (n *Nat) AcceptPkt6(pkt *Packet) {
 	if !common.IsIPv4(n.defaultGateway.IPv4Addr) {
 		if len(pkt.Data()) > n.defaultGateway.MTU {
 			log.Warn().Msg("Cannot sent packet on the WAN interface due to MTU constraints. TODO, send ICMP back")
+			return
 		}
 
 		// Probably a NAT'able packet from here on
-		// Drop the TTL. This will mean anything onwards should have the TTL down.
-		pkt.Ip6.HopLimit -= 1
 		if err := n.natPacket(pkt, pkt.Eth); err != nil {
 			log.Error().Err(err).Msgf("failed to NAT packet %s", pkt)
 		}
@@ -135,10 +138,10 @@ func (n *Nat) handleRouterSolicitation(pkt *Packet, icmp *layers.ICMPv6) {
 
 	// TODO, function to generate a router advertisement / options
 	opts := []layers.ICMPv6Option{
-		{Type: layers.ICMPv6OptPrefixInfo, Data: []byte("\x40\xc0\x00\x00\x1a\x49\x00\x00\x0c\x38\x00\x00\x00\x00\xfd\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00")}, // prefix to fd00::/64
-		{Type: layers.ICMPv6Opt(25), Data: []byte("\x40\xc0\x00\x00\x04\xb0\xfd\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x01")},                                       // DNS server to fd00::1
-		{Type: layers.ICMPv6OptMTU, Data: []byte("\x00\x00\x00\x00\x05\xd4")},                                                                                                        // MTU to 1492.
-		{Type: layers.ICMPv6Opt(24), Data: []byte("\x00\x00\x00\x00\x07\x08")},                                                                                                       // static route for ::/0
+		{Type: layers.ICMPv6OptPrefixInfo, Data: common.ICMPv6OptPrefixInfo(net.ParseIP("fd00::"), 64, 6729, 3128, true, true, false)},
+		{Type: layers.ICMPv6Opt(25), Data: common.ICMPv6OptDNS(net.ParseIP("fd00::1"), 1200)},                  // DNS server to fd00::1
+		{Type: layers.ICMPv6OptMTU, Data: common.ICMPv6OptMTU(uint32(1492))},                                   // MTU to 1492.
+		{Type: layers.ICMPv6Opt(24), Data: common.ICMPv6OptRouteInformation(*Ipv6ZeroSlashZero, uint32(1800))}, // static route for ::/0 to 1800
 		{Type: layers.ICMPv6OptSourceAddress, Data: pkt.Eth.SrcMAC},
 	}
 	icmp6reply := layers.ICMPv6RouterAdvertisement{
@@ -173,7 +176,6 @@ func (n *Nat) handleNeighborAdvertisement(pkt *Packet, ns *layers.ICMPv6Neighbor
 			n.arpNotify.AddArpEntry(ns.TargetAddress, option.Data, pkt.FromInterface.IfName)
 		}
 	}
-
 }
 func (n *Nat) handleNeighborSolicitation(pkt *Packet, icmp *layers.ICMPv6) {
 	ipsrc := pkt.SrcIP()
@@ -234,7 +236,8 @@ func (n *Nat) handleNeighborSolicitation(pkt *Packet, icmp *layers.ICMPv6) {
 // arthmatic to work it out.  The final packet length doesnt change, so we can just send it back.
 func sendICMPv6EchoResponse(icmp *layers.ICMPv6, pkt *Packet) (err error) {
 	// Drop the TTL. This will mean anything onwards should have the TTL down.
-	log.Debug().Msgf("=====================================input pkt for %s ------ =====================================", pkt)
+	log.Debug().Interface("EchoReq", pkt).Msg("EchoReq input")
+
 	pkt.Ip6.HopLimit -= 1
 	// Flip the packet around, and send it pack. Shortcut to generating an ICMP packet.
 	oldDstIp := pkt.Ip6.DstIP
@@ -272,6 +275,55 @@ func sendICMPv6EchoResponse(icmp *layers.ICMPv6, pkt *Packet) (err error) {
 	err = pkt.FromInterface.Callback.SendBytes(fullPacket)
 	if err != nil {
 		log.Error().Err(err).Msgf("Failed to send packet %s", err)
+	}
+	return
+}
+
+func (n *Nat) doNS(dst net.IP, intf *Interface) (err error) {
+	log.Info().Msgf("Doing an NS request for %s from %s", dst, intf.IfName)
+	// Send Neighbor Solicitation
+	// Dst mac is ff02::1:ff + last 3 bytes of the IPv6 address
+	dstIP := append(NSAddress[0:12], dst[12:16]...)
+	// Dst ip is 33:33:ff + last 3 bytes of the IPv6 address
+	dstMac := append([]byte{0x33, 0x33, 0xff}, dst[13:16]...)
+
+	eth := &layers.Ethernet{
+		SrcMAC:       intf.IfHWAddr,
+		DstMAC:       net.HardwareAddr(dstMac),
+		EthernetType: layers.EthernetTypeIPv6,
+	}
+	ipLayer := &layers.IPv6{
+		SrcIP:      intf.IPv4Addr,
+		DstIP:      dstIP,
+		Version:    6,
+		HopLimit:   64,
+		NextHeader: layers.IPProtocolICMPv6,
+	}
+	icmpLayer := &layers.ICMPv6{TypeCode: layers.CreateICMPv6TypeCode(layers.ICMPv6TypeNeighborSolicitation, 0)}
+	_ = icmpLayer.SetNetworkLayerForChecksum(ipLayer)
+	opts := []layers.ICMPv6Option{
+		{Type: layers.ICMPv6OptSourceAddress, Data: intf.IfHWAddr},
+	}
+	icmp6reply := layers.ICMPv6NeighborAdvertisement{TargetAddress: dst, Options: opts}
+
+	buffer := gopacket.NewSerializeBuffer()
+	err = gopacket.SerializeLayers(buffer,
+		PktSerialisationOptions,
+		eth,
+		ipLayer,
+		icmpLayer,
+		&icmp6reply,
+	)
+	if err != nil {
+		log.Error().Err(err).Msgf("Failed to serialize packet %s", err)
+		return
+	}
+	pkt := gopacket.NewPacket(buffer.Bytes(), layers.LayerTypeEthernet, gopacket.Default)
+	log.Debug().Interface("NeighborSol", pkt).Msg("Output Neighbor sol packet")
+	err = intf.Callback.SendBytes(buffer.Bytes())
+	if err != nil {
+		log.Error().Err(err).Msgf("Failed to send packet %s", err)
+		return
 	}
 	return
 }

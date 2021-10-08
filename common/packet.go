@@ -118,3 +118,67 @@ func FixICMPv6Checksum(src, dst, b []byte, lengthIcmp int) uint16 {
 	return ^uint16(csum)
 
 }
+
+// ICMPv6OptPrefixInfo creates an ICMPv6 option for prefix info RS
+func ICMPv6OptPrefixInfo(prefix net.IP, prefixLen int, validLifetime, preferredLifetime uint32, onlink, autonomous, router bool) []byte {
+	flags := byte(0)
+	if onlink {
+		flags |= 0x80
+	}
+	if autonomous {
+		flags |= 0x40
+	}
+	if router {
+		flags |= 0x20
+	}
+	bs := [30]byte{}
+	if prefixLen > 128 {
+		log.Fatal().Msgf("Invalid prefix length %d. ipv6 prefix must be 128 or less", prefixLen)
+	}
+	bs[0] = byte(prefixLen)
+	bs[1] = flags
+	binary.BigEndian.PutUint32(bs[2:6], validLifetime)
+	binary.BigEndian.PutUint32(bs[6:10], preferredLifetime)
+	if len(prefix) != 16 {
+		log.Fatal().Msgf("Invalid IP - %s. Dont think this will happen", prefix)
+	}
+	copy(bs[14:], prefix)
+	return bs[:]
+}
+
+// ICMPv6OptDns creates a DNS option for an ICMPv6 RA.
+func ICMPv6OptDNS(server net.IP, lifetime uint32) []byte {
+	bs := [22]byte{}
+	binary.BigEndian.PutUint32(bs[2:6], lifetime)
+	if len(server) != 16 {
+		log.Fatal().Msgf("Invalid IP - %s. Dont think this will happen", server)
+	}
+	copy(bs[6:], server)
+	return bs[:]
+}
+
+// ICMPv6OptMTU create an ICMPv6 option for MTU
+func ICMPv6OptMTU(mtu uint32) []byte {
+	bs := [6]byte{}
+	binary.BigEndian.PutUint32(bs[2:6], mtu)
+	return bs[:]
+}
+
+// ICMPv6OptRouteInformation defined in rfc4191. Flags don't do much, I suspect I'll always want medium priority
+func ICMPv6OptRouteInformation(prefix net.IPNet, lifetime uint32) []byte {
+	bs := make([]byte, 6) // 6 is minimum
+	flags := byte(0)
+	prefixlen, _ := prefix.Mask.Size()
+	bs[0] = byte(prefixlen)
+	bs[1] = flags
+
+	binary.BigEndian.PutUint32(bs[2:6], lifetime)
+
+	if prefixlen > 0 && prefixlen <= 64 {
+		bs = append(bs, prefix.IP[:8]...)
+	} else if prefixlen > 64 && prefixlen <= 128 {
+		bs = append(bs, prefix.IP[:16]...)
+	}
+
+	return bs[:]
+}

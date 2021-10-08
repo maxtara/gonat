@@ -14,7 +14,7 @@ This could potentially work as a simple home NAT, if you have a seperate modem.
   * Single WAN interface
   * Optional DHCP server on each LAN interface, additionally can setup static IP entries
   * RFC compliant (details below)
-  * Supports IPv4 only.
+  * Supports IPv4, partial IPv6 support (on going work)
   * FTP not supported.
   * Fragmentation supported, but only on the input (does not fragment out currently).
     
@@ -35,12 +35,6 @@ ip addr flush dev eth2
 ip addr flush dev eth1
 ip addr flush dev veth1
 ip addr flush dev veth0
-ip addr flush dev veth2
-ip addr flush dev veth3
-
-# Turn off ipv6
-sysctl -w net.ipv6.conf.default.disable_ipv6=1
-sysctl -w net.ipv6.conf.all.disable_ipv6=1
 
 # Turn off routing
 sysctl -w net.ipv4.ip_forward=0
@@ -101,6 +95,7 @@ ping 1.1.1.1 -n  -f  -c 100; ping 8.8.8.8 -n  -f  -c 100
   * DHCP client on WAN interface
   * Upnp
   * port knocking
+  * Check IPv6 RFC compliance
   
 # RFC compliance
   

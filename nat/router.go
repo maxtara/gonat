@@ -6,6 +6,7 @@ package nat
 
 import (
 	"errors"
+	"fmt"
 	"gonat/common"
 	"net"
 	"sync"
@@ -387,4 +388,42 @@ func (n *Nat) trackTCP(forwardEntry *NatEntry, tcp *layers.TCP) {
 		receiverEntry.TcpState.State = TCPCloseWait
 		receiverEntry.TcpState.Initiator = false
 	}
+}
+
+// getEthAddr - get the Ethernet address of the ip
+// 1. Check the ARP table
+// 2. If not found, send ARP request on all interfaces that contains the ip
+// 3. Then wait for ARP reply
+func (n *Nat) getEthAddr(ip net.IP) (ArpEntry, error) {
+
+	mac, ok := n.arpNotify.GetArpEntry(ip)
+	if !ok {
+		log.Warn().Msgf("failed to find gateway ARP entry for %s. Waiting", ip)
+
+		for _, intVal := range n.interfaces {
+			// log.Debug().Msgf("Checking %+v for %s. Waiting", intVal.IPv4Network, ip)
+			if intVal.IPv4Network.Contains(ip) {
+				if common.IsIPv4(ip) {
+					if err := n.doArp(ip, &intVal); err != nil {
+						return EmptyArpEntry, err
+					}
+				} else {
+					if err := n.doNS(ip, &intVal); err != nil {
+						return EmptyArpEntry, err
+					}
+				}
+			}
+		}
+
+		// Wait for either the ARP response, or a timeout.
+		mac, ok := n.arpNotify.WaitForArp(ip)
+		if !ok {
+			return EmptyArpEntry, fmt.Errorf("ARP entry not there, even after waiting. Bad news")
+
+		}
+		log.Info().Msgf("Got ARP entry for %s - %s after waiting", ip, mac)
+		return mac, nil
+	}
+
+	return mac, nil
 }
